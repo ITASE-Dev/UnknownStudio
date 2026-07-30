@@ -1,14 +1,20 @@
 pub mod chat_panel;
+pub mod dnd;
 pub mod media_panel;
 pub mod timeline_panel;
 
 use crate::app::modals::{ModalAction, Modals};
 use crate::app::router::AppRoute;
 use crate::app::Project;
-use crate::ui::components::inspector::thumbnail_preview_box_fit;
+use crate::media::{Decoded, PreviewEngine, Quality, Textures};
+use crate::ui::components::inspector::preview_plate;
 use crate::ui::core::buttons::{icon_button_painted, pro_button, Icon};
 use crate::ui::theme::tokens::*;
 use eframe::egui::{self, Align, Layout, Margin, RichText, Stroke, Ui};
+use std::collections::HashSet;
+
+/// Texture key for the program monitor.
+const PROGRAM_TEXTURE: &str = "program_monitor";
 
 /// Breakpoints for the editor chrome: below these the side panels fold away.
 const MEDIA_MIN_W: f32 = 1000.0;
@@ -21,6 +27,16 @@ pub struct StudioState {
     pub show_chat: bool,
     pub show_media: bool,
     pub playing: bool,
+    /// Media-pool asset currently being dragged towards the timeline.
+    pub drag: Option<dnd::DragAsset>,
+
+    /// Background decode service + the textures it fills.
+    pub engine: PreviewEngine,
+    pub textures: Textures,
+    /// Thumbnail jobs already queued, so a pool redraw doesn't re-request them.
+    requested_thumbs: HashSet<String>,
+    /// Timeline position the monitor was last asked for.
+    last_request: Option<f32>,
 }
 
 impl Default for StudioState {
@@ -32,6 +48,11 @@ impl Default for StudioState {
             show_chat: true,
             show_media: true,
             playing: false,
+            drag: None,
+            engine: PreviewEngine::new(),
+            textures: Textures::default(),
+            requested_thumbs: HashSet::new(),
+            last_request: None,
         }
     }
 }
@@ -51,6 +72,20 @@ pub fn show(
 
     toolbar(ctx, route, state, modals, project);
 
+    // Files dropped onto the window land in the pool exactly like picked ones.
+    let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {
+        i.raw
+            .dropped_files
+            .iter()
+            .filter_map(|f| f.path.clone())
+            .collect()
+    });
+    if !dropped.is_empty() {
+        state.media.import_paths(dropped);
+    }
+
+    pump_media(ctx, state);
+
     if chat_visible {
         egui::SidePanel::left("studio_chat")
             .resizable(true)
@@ -66,7 +101,11 @@ pub fn show(
             .default_width((w * 0.22).clamp(240.0, 340.0))
             .width_range(220.0..=420.0)
             .frame(panel_frame())
-            .show(ctx, |ui| media_panel::show(ui, &mut state.media));
+            .show(ctx, |ui| {
+                if let Some(asset) = media_panel::show(ui, &mut state.media, &state.textures) {
+                    state.drag = Some(asset);
+                }
+            });
     }
 
     egui::TopBottomPanel::bottom("studio_timeline")
@@ -74,11 +113,81 @@ pub fn show(
         .default_height(200.0)
         .height_range(140.0..=380.0)
         .frame(panel_frame())
-        .show(ctx, |ui| timeline_panel::show(ui, &mut state.timeline));
+        .show(ctx, |ui| {
+            timeline_panel::show(ui, &mut state.timeline, &mut state.drag, &state.textures)
+        });
 
     egui::CentralPanel::default()
         .frame(egui::Frame::none().fill(BG_APP).inner_margin(Margin::same(10.0)))
         .show(ctx, |ui| preview(ui, state, project));
+
+    // The timeline consumes a valid drop; anything still in flight after every
+    // panel has drawn was released elsewhere and is discarded.
+    if let Some(asset) = &state.drag {
+        dnd::ghost(ctx, asset);
+        if ctx.input(|i| i.pointer.any_released()) {
+            state.drag = None;
+        }
+    }
+}
+
+/// Advances playback, keeps the decoder's program current, asks for the frame
+/// under the playhead and uploads whatever came back. Everything here is
+/// non-blocking: the worker threads own all FFmpeg work.
+fn pump_media(ctx: &egui::Context, state: &mut StudioState) {
+    let end = state.timeline.content_end();
+    if state.playing {
+        let dt = ctx.input(|i| i.stable_dt).min(0.1);
+        state.timeline.playhead += dt;
+        if state.timeline.playhead >= end {
+            state.timeline.playhead = end;
+            state.playing = false;
+        }
+        state.timeline.seconds = state.timeline.seconds.max(state.timeline.playhead);
+    }
+
+    let program = state.timeline.program();
+    let program_changed = program != *state.engine.program();
+    state.engine.set_program(program);
+
+    // Re-request only when the position (or the program under it) moved.
+    let playhead = state.timeline.playhead;
+    if program_changed || state.last_request != Some(playhead) {
+        state.last_request = Some(playhead);
+        // Smoothness matters more than resolution while running; a parked
+        // playhead gets the full-size frame.
+        let quality = if state.playing {
+            Quality::Proxy
+        } else {
+            Quality::Full
+        };
+        state.engine.request_frame(playhead, quality);
+    }
+
+    request_thumbnails(state);
+
+    for decoded in state.engine.poll().collect::<Vec<_>>() {
+        match decoded {
+            Decoded::Frame { frame, .. } => state.textures.set(ctx, PROGRAM_TEXTURE, &frame),
+            Decoded::Blank { .. } => state.textures.remove(PROGRAM_TEXTURE),
+            Decoded::Thumbnail { path, frame } => {
+                state.textures.set(ctx, path.to_string_lossy(), &frame)
+            }
+        }
+    }
+}
+
+/// Queues a poster frame for every pool asset that doesn't have one yet.
+fn request_thumbnails(state: &mut StudioState) {
+    for asset in &state.media.assets {
+        let Some(path) = asset.path.clone() else {
+            continue;
+        };
+        let key = path.to_string_lossy().into_owned();
+        if state.requested_thumbs.insert(key) {
+            state.engine.request_thumbnail(path);
+        }
+    }
 }
 
 fn panel_frame() -> egui::Frame {
@@ -156,15 +265,18 @@ fn toolbar(
 fn preview(ui: &mut Ui, state: &mut StudioState, project: Option<&Project>) {
     let transport_h = 40.0;
     let avail_h = (ui.available_height() - transport_h).max(80.0);
+    let image = state.textures.get(PROGRAM_TEXTURE);
     ui.vertical_centered(|ui| {
-        thumbnail_preview_box_fit(
+        let width = ui.available_width().min(avail_h * 16.0 / 9.0);
+        preview_plate(
             ui,
             &format!(
                 "{} · {}",
                 project.map(|p| p.platform.as_str()).unwrap_or("YouTube 16:9"),
                 state.timeline.timecode()
             ),
-            avail_h,
+            width,
+            image,
         );
     });
     ui.add_space(6.0);

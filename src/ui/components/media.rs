@@ -1,6 +1,8 @@
 use crate::ui::components::timeline::sparkle;
 use crate::ui::responsive::{elided_galley, grid};
 use crate::ui::theme::tokens::*;
+use crate::media::Poster;
+use crate::ui::imaging::cover_uv;
 use eframe::egui::{
     self, Align2, Color32, FontFamily, FontId, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2,
 };
@@ -16,11 +18,13 @@ pub fn media_pool_item(
     duration: &str,
     selected: bool,
     width: f32,
+    thumb: Option<Poster>,
 ) -> Response {
     let width = width.max(72.0);
     let plate_h = (width * 9.0 / 16.0).round();
     let name_h = 34.0;
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, plate_h + name_h), Sense::click());
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(width, plate_h + name_h), Sense::click_and_drag());
     let p = ui.painter().clone();
 
     let stroke = if selected {
@@ -34,7 +38,9 @@ pub fn media_pool_item(
 
     let plate = Rect::from_min_size(rect.min + Vec2::splat(1.0), Vec2::new(width - 2.0, plate_h));
     p.rect_filled(plate, top_rounding(5.0), BG_SUNKEN);
-    play_glyph(&p, plate);
+    if !paint_thumb(&p, plate, thumb) {
+        play_glyph(&p, plate);
+    }
     duration_badge(&p, plate, duration);
 
     let galley = elided_galley(
@@ -61,12 +67,14 @@ pub fn generated_asset_item(
     duration: &str,
     selected: bool,
     width: f32,
+    thumb: Option<Poster>,
 ) -> Response {
     let width = width.max(72.0);
     let plate_h = (width * 9.0 / 16.0).round();
     let show_model = width >= 118.0;
     let text_h = if show_model { 44.0 } else { 30.0 };
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, plate_h + text_h), Sense::click());
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(width, plate_h + text_h), Sense::click_and_drag());
     let p = ui.painter().clone();
 
     let stroke = if selected {
@@ -80,8 +88,10 @@ pub fn generated_asset_item(
 
     let plate = Rect::from_min_size(rect.min + Vec2::splat(1.0), Vec2::new(width - 2.0, plate_h));
     p.rect_filled(plate, top_rounding(5.0), BG_SUNKEN);
+    if !paint_thumb(&p, plate, thumb) {
+        play_glyph(&p, plate);
+    }
     p.rect_filled(plate, top_rounding(5.0), AI.linear_multiply(0.10));
-    play_glyph(&p, plate);
     duration_badge(&p, plate, duration);
 
     let badge = Rect::from_min_size(
@@ -132,25 +142,55 @@ pub struct PoolAsset<'a> {
     pub duration: &'a str,
     pub kind: AssetKind,
     pub selected: bool,
+    /// Decoded poster frame; falls back to the play glyph while it loads.
+    pub thumb: Option<Poster>,
+}
+
+/// What the pool grid reported this frame. Both indices address `assets`.
+#[derive(Default)]
+pub struct PoolEvents {
+    pub clicked: Option<usize>,
+    pub drag_started: Option<usize>,
 }
 
 /// Media pool laid out as a grid that reflows column count on resize.
-/// Returns the index of a clicked card, if any.
-pub fn media_pool_grid(ui: &mut Ui, assets: &[PoolAsset<'_>]) -> Option<usize> {
-    let mut clicked = None;
+pub fn media_pool_grid(ui: &mut Ui, assets: &[PoolAsset<'_>]) -> PoolEvents {
+    let mut events = PoolEvents::default();
     grid(ui, assets.len(), ITEM_MIN_W, ITEM_MAX_W, |ui, i, w| {
         let a = &assets[i];
         let resp = match a.kind {
-            AssetKind::Ingested => media_pool_item(ui, a.name, a.duration, a.selected, w),
+            AssetKind::Ingested => media_pool_item(ui, a.name, a.duration, a.selected, w, a.thumb),
             AssetKind::Generated => {
-                generated_asset_item(ui, a.name, a.meta, a.duration, a.selected, w)
+                generated_asset_item(ui, a.name, a.meta, a.duration, a.selected, w, a.thumb)
             }
         };
         if resp.clicked() {
-            clicked = Some(i);
+            events.clicked = Some(i);
+        }
+        if resp.drag_started() {
+            events.drag_started = Some(i);
+        }
+        if resp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         }
     });
-    clicked
+    events
+}
+
+/// Fills the 16:9 plate with the poster frame, cropping the overhanging axis
+/// instead of squashing it. Returns false when there is nothing to draw yet.
+fn paint_thumb(p: &egui::Painter, plate: Rect, thumb: Option<Poster>) -> bool {
+    let Some(poster) = thumb else {
+        return false;
+    };
+    let target_aspect = plate.width() / plate.height().max(0.001);
+    p.image(
+        poster.id,
+        plate,
+        cover_uv(target_aspect, poster.aspect),
+        Color32::WHITE,
+    );
+    true
 }
 
 fn play_glyph(p: &egui::Painter, plate: Rect) {

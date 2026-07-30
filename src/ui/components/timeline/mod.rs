@@ -74,7 +74,11 @@ fn timecode(s: f32, step: f32) -> String {
 /// Time ruler whose tick and label density adapt to the current zoom.
 pub fn ruler(ui: &mut Ui, seconds: f32, px_per_sec: f32) -> Response {
     let w = content_width(ui, seconds, px_per_sec);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 20.0), Sense::click());
+    // Drag as well as click: the ruler is the scrub surface.
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 20.0), Sense::click_and_drag());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
     let p = ui.painter();
     p.rect_filled(rect, Rounding::ZERO, BG_SUNKEN);
 
@@ -109,6 +113,15 @@ pub fn ruler(ui: &mut Ui, seconds: f32, px_per_sec: f32) -> Response {
         Stroke::new(1.0_f32, BORDER),
     );
     resp
+}
+
+/// Scrub position from a ruler interaction, clamped to the timeline span.
+pub fn ruler_scrub(resp: &Response, seconds: f32, px_per_sec: f32) -> Option<f32> {
+    if !(resp.clicked() || resp.dragged()) {
+        return None;
+    }
+    let pointer = resp.interact_pointer_pos()?;
+    Some(seconds_at(resp.rect, pointer.x, px_per_sec).clamp(0.0, seconds))
 }
 
 /// Empty lane spanning the viewport, with a grid that thins out as you zoom out.

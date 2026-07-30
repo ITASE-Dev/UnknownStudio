@@ -1,6 +1,7 @@
 //! Global application shell: state, routing, menu bar and modal overlays.
 #![allow(dead_code)]
 
+pub mod ai;
 pub mod menu_bar;
 pub mod modals;
 pub mod router;
@@ -37,11 +38,18 @@ pub struct AiDirectorApp {
     pub onboarding: views::onboarding::OnboardingState,
     pub studio: views::studio::StudioState,
     pub growth: views::growth::GrowthState,
+    pub ai: ai::AiBridge,
 }
 
 impl AiDirectorApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
+        let ai = ai::AiBridge::new();
+        let director_state = if ai.is_online() {
+            ServiceState::Online
+        } else {
+            ServiceState::Error
+        };
         Self {
             route: AppRoute::Dashboard,
             history: RouteHistory::default(),
@@ -52,7 +60,7 @@ impl AiDirectorApp {
                 ("Audio Engine Online", ServiceState::Online),
                 ("ComfyUI Rendering…", ServiceState::Working),
                 ("Whisper ASR Online", ServiceState::Online),
-                ("LLM Director Offline", ServiceState::Error),
+                ("LLM Director", director_state),
             ],
             time: 0.0,
             gallery_open: false,
@@ -61,6 +69,7 @@ impl AiDirectorApp {
             onboarding: Default::default(),
             studio: Default::default(),
             growth: Default::default(),
+            ai,
         }
     }
 
@@ -75,6 +84,9 @@ impl eframe::App for AiDirectorApp {
         let dt = (now - self.time).clamp(0.0, 0.1);
         self.time = now;
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
+
+        // 0. Drain the action engine before any view reads its state.
+        self.ai.poll();
 
         // 1. Chrome first, so every route sits under the same menu bar.
         let project_name = self

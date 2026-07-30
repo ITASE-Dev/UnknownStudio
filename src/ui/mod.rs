@@ -5,6 +5,7 @@
 
 pub mod components;
 pub mod core;
+pub mod imaging;
 pub mod responsive;
 pub mod theme;
 

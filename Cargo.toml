@@ -5,3 +5,22 @@ edition = "2024"
 
 [dependencies]
 eframe = "0.27"
+
+# action_engine
+base64 = "0.22"
+# FFmpeg 8 (vcpkg) compatible; 7.0 fails against FFmpeg 8 (avfft.h removed).
+ffmpeg-next = "8.1"
+reqwest = { version = "0.12", features = ["blocking", "json", "multipart"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1.8", features = ["v4"] }
+
+# media ingest
+rfd = "0.14"
+
+# Decode/analysis hot loops are unusably slow in an unoptimized debug build.
+[profile.dev]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 3

@@ -1,4 +1,6 @@
+mod action_engine;
 mod app;
+mod media;
 mod ui;
 mod views;
 

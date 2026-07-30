@@ -156,10 +156,10 @@ fn media(ui: &mut Ui) {
                 media_pool_grid(
                     ui,
                     &[
-                        PoolAsset { name: "Clip_01.mp4", meta: "", duration: "00:06", kind: AssetKind::Ingested, selected: true },
-                        PoolAsset { name: "Clip_02.mp4", meta: "", duration: "00:07", kind: AssetKind::Ingested, selected: false },
-                        PoolAsset { name: "gen_neon_city.mp4", meta: "flux · seed 8812", duration: "00:04", kind: AssetKind::Generated, selected: false },
-                        PoolAsset { name: "VO_take3.wav", meta: "", duration: "00:11", kind: AssetKind::Ingested, selected: false },
+                        PoolAsset { name: "Clip_01.mp4", meta: "", duration: "00:06", kind: AssetKind::Ingested, selected: true, thumb: None },
+                        PoolAsset { name: "Clip_02.mp4", meta: "", duration: "00:07", kind: AssetKind::Ingested, selected: false, thumb: None },
+                        PoolAsset { name: "gen_neon_city.mp4", meta: "flux · seed 8812", duration: "00:04", kind: AssetKind::Generated, selected: false, thumb: None },
+                        PoolAsset { name: "VO_take3.wav", meta: "", duration: "00:11", kind: AssetKind::Ingested, selected: false, thumb: None },
                     ],
                 );
             },

@@ -1,3 +1,4 @@
+use crate::ui::imaging::{contain_rect, full_uv};
 use crate::ui::responsive::{breakpoint, elided_galley};
 use crate::ui::theme::tokens::*;
 use eframe::egui::{
@@ -18,6 +19,17 @@ pub fn thumbnail_preview_box_fit(ui: &mut Ui, caption: &str, max_height: f32) ->
 
 /// 16:9 preview plate at an explicit width, with mock framing guides.
 pub fn thumbnail_preview_box_sized(ui: &mut Ui, caption: &str, width: f32) -> Response {
+    preview_plate(ui, caption, width, None)
+}
+
+/// Program monitor: same plate, but showing a decoded frame when one exists.
+/// Guides are only drawn over the empty plate — never on top of real video.
+pub fn preview_plate(
+    ui: &mut Ui,
+    caption: &str,
+    width: f32,
+    image: Option<crate::media::Poster>,
+) -> Response {
     let width = width.max(64.0);
     let rect_size = Vec2::new(width, (width * 9.0 / 16.0).round());
     let (rect, resp) = ui.allocate_exact_size(rect_size, Sense::click());
@@ -29,6 +41,20 @@ pub fn thumbnail_preview_box_sized(ui: &mut Ui, caption: &str, width: f32) -> Re
         hairline()
     };
     p.rect(rect, R, BG_SUNKEN, stroke);
+
+    if let Some(poster) = image {
+        // Letterbox: the monitor shows the whole frame, never a stretched or
+        // cropped one, whatever the source aspect is.
+        let inner = rect.shrink(1.0);
+        p.rect_filled(inner, R, Color32::BLACK);
+        p.image(
+            poster.id,
+            contain_rect(inner, poster.aspect),
+            full_uv(),
+            Color32::WHITE,
+        );
+        return caption_and_badge(ui, &p, rect, caption, resp);
+    }
 
     // Thirds guides.
     let g = Stroke::new(1.0_f32, Color32::from_white_alpha(8));
@@ -47,6 +73,16 @@ pub fn thumbnail_preview_box_sized(ui: &mut Ui, caption: &str, width: f32) -> Re
     p.line_segment([Pos2::new(c.x - a, c.y), Pos2::new(c.x + a, c.y)], cross);
     p.line_segment([Pos2::new(c.x, c.y - a), Pos2::new(c.x, c.y + a)], cross);
 
+    caption_and_badge(ui, &p, rect, caption, resp)
+}
+
+fn caption_and_badge(
+    ui: &mut Ui,
+    p: &egui::Painter,
+    rect: Rect,
+    caption: &str,
+    resp: Response,
+) -> Response {
     if !caption.is_empty() && rect.height() > 62.0 {
         let tag = Rect::from_min_size(
             Pos2::new(rect.left() + 6.0, rect.bottom() - 22.0),
