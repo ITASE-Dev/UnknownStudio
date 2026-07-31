@@ -1,5 +1,6 @@
-use crate::app::router::{AppRoute, ProjectId};
-use crate::app::Project;
+use crate::app::library::ProjectLibrary;
+use crate::app::router::AppRoute;
+use crate::workspace::TargetPlatform;
 use crate::ui::core::buttons::{ghost_button, pro_button};
 use crate::ui::core::inputs::pro_text_input;
 use crate::ui::core::toggles::pro_toggle_row;
@@ -50,15 +51,22 @@ impl Default for OnboardingState {
 
 const STEPS: [&str; 3] = ["Format", "Blueprint", "Automation"];
 
+fn platform_target(index: usize) -> TargetPlatform {
+    match index {
+        1 => TargetPlatform::YouTubeShorts,
+        2 => TargetPlatform::InstagramReels,
+        _ => TargetPlatform::YouTubeLandscape,
+    }
+}
+
 pub fn show(
     ctx: &egui::Context,
     route: &mut AppRoute,
     state: &mut OnboardingState,
-    projects: &mut Vec<Project>,
-    next_id: &mut ProjectId,
+    library: &mut ProjectLibrary,
 ) {
     super::page(ctx, 780.0, |ui| {
-        content(ui, route, state, projects, next_id);
+        content(ui, route, state, library);
     });
 }
 
@@ -66,8 +74,7 @@ pub fn content(
     ui: &mut Ui,
     route: &mut AppRoute,
     state: &mut OnboardingState,
-    projects: &mut Vec<Project>,
-    next_id: &mut ProjectId,
+    library: &mut ProjectLibrary,
 ) {
     ui.label(RichText::new("New Project").heading().strong().color(TEXT_PRIMARY));
     ui.label(
@@ -86,15 +93,14 @@ pub fn content(
     });
 
     ui.add_space(14.0);
-    footer(ui, route, state, projects, next_id);
+    footer(ui, route, state, library);
 }
 
 fn footer(
     ui: &mut Ui,
     route: &mut AppRoute,
     state: &mut OnboardingState,
-    projects: &mut Vec<Project>,
-    next_id: &mut ProjectId,
+    library: &mut ProjectLibrary,
 ) {
     let last = state.step == STEPS.len() - 1;
     ui.horizontal(|ui| {
@@ -104,23 +110,19 @@ fn footer(
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if last {
                 if pro_button(ui, "Start Studio", true).clicked() {
-                    let id = *next_id;
-                    *next_id += 1;
-                    projects.push(Project {
-                        id,
-                        name: if state.name.trim().is_empty() {
-                            "Untitled Project".into()
-                        } else {
-                            state.name.trim().to_owned()
-                        },
-                        platform: PLATFORMS[state.platform].0.into(),
-                        blueprint: BLUEPRINTS[state.blueprint].0.into(),
-                        duration: "00:00:00".into(),
-                        modified: "just now".into(),
-                        clips: 0,
-                    });
+                    let name = match state.name.trim() {
+                        "" => "Untitled Project",
+                        name => name,
+                    };
+                    // Writes the project folder first; the studio opens once
+                    // the creation lands, so nothing is listed that isn't saved.
+                    library.create_and_open(
+                        name,
+                        platform_target(state.platform),
+                        BLUEPRINTS[state.blueprint].0,
+                    );
                     *state = OnboardingState::default();
-                    *route = AppRoute::Studio(id);
+                    *route = AppRoute::Dashboard;
                 }
             } else if pro_button(ui, "Next", true).clicked() {
                 state.step += 1;

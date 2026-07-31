@@ -17,6 +17,8 @@ pub struct DragAsset {
     pub path: Option<PathBuf>,
     pub seconds: f32,
     pub kind: ClipKind,
+    /// Whether the source carries an audio stream — a video clip is audible too.
+    pub has_audio: bool,
 }
 
 impl DragAsset {

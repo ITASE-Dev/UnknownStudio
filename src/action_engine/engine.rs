@@ -5,7 +5,7 @@
 //! (enqueue) and `drain` (non-blocking poll), so a frame is never blocked on
 //! network or FFmpeg work.
 
-use crate::action_engine::audio;
+use crate::action_engine::clip_audio;
 use crate::action_engine::edits::{plan_head_trim, FrameRange, TimelineEdit};
 use crate::action_engine::filters::extract_eq_spec;
 use crate::action_engine::prompts::{
@@ -224,7 +224,7 @@ fn analyze<P: ActionProvider>(
     }
 
     out.progress("Transcribing audio…");
-    let transcript = audio::clip_wav(&clip)
+    let transcript = clip_audio::clip_wav(&clip)
         .and_then(|wav| provider.transcribe(wav))
         .unwrap_or_default();
 
@@ -266,16 +266,13 @@ fn execute<P: ActionProvider>(
         ActionKind::TrimSilence => {
             out.progress("Scanning for silence…");
             let clip = &context.clip;
-            let min_duration_frames =
-                (clip.fps() * audio::DEFAULT_MIN_SILENCE_SECONDS).round() as u64;
             out.result(
-                audio::analyze_silence(clip, audio::DEFAULT_SILENCE_THRESHOLD_DB, min_duration_frames)
-                    .map(|ranges: Vec<FrameRange>| {
-                        ActionEvent::Edit(TimelineEdit::CutRanges {
-                            clip_id: clip.id,
-                            ranges,
-                        })
-                    }),
+                clip_audio::silence_ranges(clip).map(|ranges: Vec<FrameRange>| {
+                    ActionEvent::Edit(TimelineEdit::CutRanges {
+                        clip_id: clip.id,
+                        ranges,
+                    })
+                }),
             )
         }
 

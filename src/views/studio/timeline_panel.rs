@@ -1,20 +1,35 @@
-use crate::ui::components::timeline::clip::{clip_block, ClipKind};
+use crate::ui::components::timeline::clip::{clip_block, ClipKind, ClipVisuals, Filmstrip};
 use crate::ui::components::timeline::headers::{header_width, track_header_sized, TrackKind};
 use crate::ui::components::timeline::markers::{
     playhead_marker, playhead_timecode, ripple_cut_marker,
 };
-use crate::media::{Segment, Textures};
+use crate::audio_engine::AudioSegment;
+use crate::media::{Poster, Segment, Textures, FILMSTRIP_FRAMES};
 use crate::ui::components::timeline::{
     clip_rect, px_per_sec_for, ruler, ruler_scrub, seconds_at, track_lane,
 };
-use crate::ui::core::buttons::{icon_button_painted, Icon};
+use crate::ui::components::timeline::tools::{tool_status, tool_strip, Tool};
+use crate::ui::core::buttons::{icon_button, icon_button_painted, Icon};
+use crate::ui::core::icons;
 use crate::ui::core::inputs::pro_slider;
 use crate::ui::theme::tokens::*;
 use crate::views::studio::dnd::{self, DragAsset};
 use eframe::egui::{Align, Layout, Rect, RichText, ScrollArea, Ui, Vec2};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+/// Stable clip identity, so a background render can find its clip again even
+/// if the track was re-packed meanwhile.
+static NEXT_CLIP_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_clip_id() -> u64 {
+    NEXT_CLIP_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 pub struct Clip {
+    pub id: u64,
     pub label: String,
     pub kind: ClipKind,
     pub start: f32,
@@ -24,11 +39,17 @@ pub struct Clip {
     pub path: Option<PathBuf>,
     /// Offset into the source where this clip starts (grows when split).
     pub trim_in: f32,
+    /// Source has an audio stream — video clips are audible too.
+    pub has_audio: bool,
+    /// Full length of the source, so a trimmed clip can locate its slice of
+    /// the waveform.
+    pub source_seconds: f32,
 }
 
 impl Clip {
     fn new(label: &str, kind: ClipKind, start: f32, len: f32) -> Self {
         Self {
+            id: next_clip_id(),
             label: label.into(),
             kind,
             start,
@@ -36,11 +57,14 @@ impl Clip {
             selected: false,
             path: None,
             trim_in: 0.0,
+            has_audio: false,
+            source_seconds: len,
         }
     }
 
     fn from_asset(asset: &DragAsset, start: f32) -> Self {
         Self {
+            id: next_clip_id(),
             label: asset.name.clone(),
             kind: asset.kind,
             start,
@@ -48,11 +72,21 @@ impl Clip {
             selected: false,
             path: asset.path.clone(),
             trim_in: 0.0,
+            has_audio: asset.has_audio,
+            source_seconds: asset.seconds,
         }
     }
 
-    fn is_video(&self) -> bool {
+    pub fn is_video(&self) -> bool {
         self.kind != ClipKind::Audio
+    }
+
+    /// `[from, to)` fraction of the source this clip shows.
+    fn source_window(&self) -> (f32, f32) {
+        let total = self.source_seconds.max(0.001);
+        let from = (self.trim_in / total).clamp(0.0, 1.0);
+        let to = ((self.trim_in + self.len) / total).clamp(from, 1.0);
+        (from, to)
     }
 }
 
@@ -101,11 +135,17 @@ impl Track {
 
 pub struct TimelineState {
     pub tracks: Vec<Track>,
+    /// Visible span. Follows the content instead of being a fixed canvas.
     pub seconds: f32,
     pub zoom: f32,
     pub playhead: f32,
     pub ripple_cuts: Vec<f32>,
+    /// Track the toolbar's reorder/remove actions apply to.
+    pub selected_track: usize,
 }
+
+/// Span shown when the timeline is empty.
+const EMPTY_SPAN_SECONDS: f32 = 12.0;
 
 impl Default for TimelineState {
     fn default() -> Self {
@@ -128,10 +168,11 @@ impl Default for TimelineState {
                     clips: Vec::new(),
                 },
             ],
-            seconds: 24.0,
+            seconds: EMPTY_SPAN_SECONDS,
             zoom: 1.0,
             playhead: 0.0,
             ripple_cuts: Vec::new(),
+            selected_track: 0,
         }
     }
 }
@@ -166,7 +207,7 @@ impl TimelineState {
         track.clips.insert(index, clip);
         track.repack();
 
-        self.seconds = self.seconds.max(self.content_end() + 2.0);
+        self.fit_span();
     }
 
     /// Re-packs one track (after a move) and keeps the visible span honest.
@@ -174,7 +215,85 @@ impl TimelineState {
         if let Some(track) = self.tracks.get_mut(track_idx) {
             track.repack();
         }
-        self.seconds = self.seconds.max(self.content_end() + 2.0);
+        self.fit_span();
+    }
+
+    /// Keeps the visible span just past the content, so a short clip is not
+    /// squeezed into a corner of a canvas sized for something else.
+    pub fn fit_span(&mut self) {
+        let end = self.content_end();
+        self.seconds = if end <= 0.0 {
+            EMPTY_SPAN_SECONDS
+        } else {
+            // A small tail leaves somewhere to drop the next clip.
+            end + (end * 0.08).clamp(0.5, 5.0)
+        };
+        self.playhead = self.playhead.clamp(0.0, self.seconds);
+    }
+
+    /// Appends a track of `kind`, grouping audio below video.
+    pub fn add_track(&mut self, kind: TrackKind) {
+        let track = Track {
+            name: String::new(),
+            kind,
+            clips: Vec::new(),
+            locked: false,
+            muted: false,
+        };
+        let at = match kind {
+            TrackKind::Video => self
+                .tracks
+                .iter()
+                .position(|t| t.kind == TrackKind::Audio)
+                .unwrap_or(self.tracks.len()),
+            TrackKind::Audio => self.tracks.len(),
+        };
+        self.tracks.insert(at, track);
+        self.selected_track = at;
+        self.renumber();
+    }
+
+    /// Moves a track up (`-1`) or down (`+1`). Video priority follows the
+    /// order, so this also decides which track wins an overlap.
+    pub fn move_track(&mut self, index: usize, delta: isize) {
+        let target = index as isize + delta;
+        if index >= self.tracks.len() || target < 0 || target as usize >= self.tracks.len() {
+            return;
+        }
+        let target = target as usize;
+        self.tracks.swap(index, target);
+        self.selected_track = target;
+        self.renumber();
+    }
+
+    /// Removes a track; the last remaining one is kept so there is always
+    /// somewhere to drop media.
+    pub fn remove_track(&mut self, index: usize) {
+        if self.tracks.len() <= 1 || index >= self.tracks.len() {
+            return;
+        }
+        self.tracks.remove(index);
+        self.selected_track = self.selected_track.min(self.tracks.len() - 1);
+        self.renumber();
+        self.fit_span();
+    }
+
+    /// V1..Vn / A1..An, top to bottom.
+    fn renumber(&mut self) {
+        let (mut video, mut audio) = (0, 0);
+        for track in self.tracks.iter_mut() {
+            let (prefix, n) = match track.kind {
+                TrackKind::Video => {
+                    video += 1;
+                    ("V", video)
+                }
+                TrackKind::Audio => {
+                    audio += 1;
+                    ("A", audio)
+                }
+            };
+            track.name = format!("{prefix}{n}");
+        }
     }
 
     /// Deletes the selection and closes the holes it leaves.
@@ -186,6 +305,7 @@ impl TimelineState {
                 track.repack();
             }
         }
+        self.fit_span();
     }
 
     /// Split the clip under the playhead on the first unlocked video track.
@@ -199,6 +319,7 @@ impl TimelineState {
             {
                 let head_len = ph - track.clips[i].start;
                 let mut tail = Clip {
+                    id: next_clip_id(),
                     label: track.clips[i].label.clone(),
                     kind: track.clips[i].kind,
                     start: ph,
@@ -207,6 +328,8 @@ impl TimelineState {
                     path: track.clips[i].path.clone(),
                     // The tail keeps showing the same source frames.
                     trim_in: track.clips[i].trim_in + head_len,
+                    has_audio: track.clips[i].has_audio,
+                    source_seconds: track.clips[i].source_seconds,
                 };
                 tail.selected = track.clips[i].selected;
                 track.clips[i].len = head_len;
@@ -251,6 +374,80 @@ impl TimelineState {
     }
 }
 
+impl TimelineState {
+    /// Everything audible, in timeline seconds. Unlike video, audio segments
+    /// may overlap — the mixer sums them. Muted tracks contribute nothing.
+    pub fn audio_program(&self) -> Vec<AudioSegment> {
+        let mut program = Vec::new();
+        for track in self.tracks.iter().filter(|t| !t.muted) {
+            for clip in track.clips.iter().filter(|c| c.has_audio) {
+                let Some(path) = clip.path.clone() else {
+                    continue;
+                };
+                program.push(AudioSegment {
+                    start: clip.start,
+                    end: clip.start + clip.len,
+                    path,
+                    media_start: clip.trim_in,
+                    gain: 1.0,
+                });
+            }
+        }
+        program.sort_by(|a, b| a.start.total_cmp(&b.start));
+        program
+    }
+
+    /// First selected clip, with the track it sits on.
+    pub fn selected_clip(&self) -> Option<(usize, &Clip)> {
+        self.tracks
+            .iter()
+            .enumerate()
+            .find_map(|(ti, t)| t.clips.iter().find(|c| c.selected).map(|c| (ti, c)))
+    }
+
+    pub fn clip_mut(&mut self, id: u64) -> Option<&mut Clip> {
+        self.tracks
+            .iter_mut()
+            .flat_map(|t| t.clips.iter_mut())
+            .find(|c| c.id == id)
+    }
+
+    /// Clip visible under `seconds` on `track_idx`.
+    pub fn clip_at(&self, track_idx: usize, seconds: f32) -> Option<&Clip> {
+        self.tracks
+            .get(track_idx)?
+            .clips
+            .iter()
+            .find(|c| seconds >= c.start && seconds < c.start + c.len)
+    }
+
+    /// Video sources on the timeline, for filmstrip decoding.
+    pub fn video_sources(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| c.is_video())
+            .filter_map(|c| c.path.clone())
+            .collect();
+        paths.dedup();
+        paths
+    }
+
+    /// Source files that need waveform peaks.
+    pub fn audio_sources(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| c.has_audio)
+            .filter_map(|c| c.path.clone())
+            .collect();
+        paths.dedup();
+        paths
+    }
+}
+
 /// Parts of `[start, end)` not already claimed by an earlier segment.
 fn uncovered(program: &[Segment], start: f32, end: f32) -> Vec<(f32, f32)> {
     let mut gaps = vec![(start, end)];
@@ -275,13 +472,23 @@ fn uncovered(program: &[Segment], start: f32, end: f32) -> Vec<(f32, f32)> {
 }
 
 /// `drag` carries a media-pool asset in flight; it is consumed here on drop.
+/// What the tool strip needs to know about the current selection.
+pub struct ToolContext<'a> {
+    /// Per-tool availability for the current selection.
+    pub availability: &'a [Result<(), &'static str>; Tool::ALL.len()],
+    pub busy: Option<Tool>,
+    pub status: Option<&'a str>,
+}
+
 pub fn show(
     ui: &mut Ui,
     state: &mut TimelineState,
     drag: &mut Option<DragAsset>,
     textures: &Textures,
-) {
-    toolbar(ui, state);
+    waveforms: &HashMap<String, Arc<Vec<f32>>>,
+    tools: ToolContext<'_>,
+) -> Option<Tool> {
+    let pressed_tool = toolbar(ui, state, &tools);
     ui.add_space(6.0);
 
     let pointer = ui.ctx().pointer_latest_pos();
@@ -290,14 +497,27 @@ pub fn show(
     // it so the track list is not borrowed while mutating.
     let mut drop_into: Option<(usize, f32)> = None;
     let mut repack: Option<usize> = None;
+    let mut select_track: Option<usize> = None;
 
     let head_w = header_width(ui);
     ui.spacing_mut().item_spacing = Vec2::ZERO;
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
             ui.add_space(20.0);
-            for t in &mut state.tracks {
-                track_header_sized(ui, &t.name, t.kind, &mut t.locked, &mut t.muted, head_w);
+            let selected = state.selected_track;
+            for (ti, t) in state.tracks.iter_mut().enumerate() {
+                let resp = track_header_sized(
+                    ui,
+                    &t.name,
+                    t.kind,
+                    &mut t.locked,
+                    &mut t.muted,
+                    head_w,
+                    ti == selected,
+                );
+                if resp.clicked() {
+                    select_track = Some(ti);
+                }
             }
         });
 
@@ -334,11 +554,24 @@ pub fn show(
                         let dim = t.muted || t.locked;
                         for c in t.clips.iter_mut() {
                             let rect = clip_rect(lane, c.start, c.len, px);
-                            let poster = c
-                                .path
-                                .as_ref()
-                                .and_then(|p| textures.get(&p.to_string_lossy()));
-                            let resp = clip_block(ui, rect, c.kind, &c.label, c.selected, poster);
+                            let key = c.path.as_ref().map(|p| p.to_string_lossy().into_owned());
+                            let (from, to) = c.source_window();
+                            let frames: Vec<Option<Poster>> = match (&key, c.is_video()) {
+                                (Some(key), true) => filmstrip_frames(textures, key),
+                                _ => Vec::new(),
+                            };
+                            let visuals = ClipVisuals {
+                                filmstrip: (!frames.is_empty()).then(|| Filmstrip {
+                                    frames: &frames,
+                                    from,
+                                    to,
+                                }),
+                                peaks: key
+                                    .as_deref()
+                                    .and_then(|k| waveforms.get(k))
+                                    .map(|peaks| (peaks.as_slice(), from, to)),
+                            };
+                            let resp = clip_block(ui, rect, c.kind, &c.label, c.selected, visuals);
                             if resp.clicked() {
                                 c.selected = !c.selected;
                             }
@@ -382,9 +615,23 @@ pub fn show(
     if let Some(track_idx) = repack {
         state.repack_track(track_idx);
     }
+    if let Some(track_idx) = select_track {
+        state.selected_track = track_idx;
+    }
+
+    pressed_tool
 }
 
-fn toolbar(ui: &mut Ui, state: &mut TimelineState) {
+/// Decoded frames for one source, indexed by filmstrip position. Missing
+/// entries are frames the worker has not produced yet.
+fn filmstrip_frames(textures: &Textures, key: &str) -> Vec<Option<Poster>> {
+    (0..FILMSTRIP_FRAMES)
+        .map(|i| textures.get(&format!("{key}#{i}")))
+        .collect()
+}
+
+fn toolbar(ui: &mut Ui, state: &mut TimelineState, tools: &ToolContext<'_>) -> Option<Tool> {
+    let mut pressed = None;
     ui.horizontal(|ui| {
         if icon_button_painted(ui, Icon::Cut, true, false).clicked() {
             state.split_at_playhead();
@@ -395,6 +642,40 @@ fn toolbar(ui: &mut Ui, state: &mut TimelineState) {
         if icon_button_painted(ui, Icon::Trash, true, false).clicked() {
             state.delete_selected();
         }
+
+        ui.add_space(10.0);
+        // Track management acts on the header-selected track.
+        if icon_button(ui, &icons::plus(icons::ADD_VIDEO_TRACK), true, false)
+            .on_hover_text("Add video track")
+            .clicked()
+        {
+            state.add_track(TrackKind::Video);
+        }
+        if icon_button(ui, &icons::plus(icons::ADD_AUDIO_TRACK), true, false)
+            .on_hover_text("Add audio track")
+            .clicked()
+        {
+            state.add_track(TrackKind::Audio);
+        }
+        if icon_button(ui, icons::MOVE_UP, true, false)
+            .on_hover_text("Move selected track up")
+            .clicked()
+        {
+            state.move_track(state.selected_track, -1);
+        }
+        if icon_button(ui, icons::MOVE_DOWN, true, false)
+            .on_hover_text("Move selected track down")
+            .clicked()
+        {
+            state.move_track(state.selected_track, 1);
+        }
+        if icon_button(ui, icons::REMOVE_TRACK, true, false)
+            .on_hover_text("Remove selected track")
+            .clicked()
+        {
+            state.remove_track(state.selected_track);
+        }
+
         ui.add_space(8.0);
         ui.label(
             RichText::new(format!("{} clips", state.clip_count()))
@@ -402,10 +683,19 @@ fn toolbar(ui: &mut Ui, state: &mut TimelineState) {
                 .color(TEXT_DISABLED),
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.set_max_width(240.0);
+            ui.set_max_width(200.0);
             pro_slider(ui, &mut state.zoom, 0.5..=8.0, "×");
         });
     });
+
+    // Second row: the render tools plus whatever the last one reported. Kept
+    // separate so a narrow timeline panel wraps instead of clipping controls.
+    ui.horizontal(|ui| {
+        pressed = tool_strip(ui, tools.busy, |tool| tools.availability[tool.index()]);
+        ui.add_space(6.0);
+        tool_status(ui, tools.status);
+    });
+    pressed
 }
 
 #[cfg(test)]
@@ -418,6 +708,7 @@ mod tests {
             path: None,
             seconds,
             kind: ClipKind::ARoll,
+            has_audio: true,
         }
     }
 
@@ -498,6 +789,74 @@ mod tests {
         assert_eq!((clips[0].start, clips[0].len, clips[0].trim_in), (0.0, 2.5, 0.0));
         assert_eq!((clips[1].start, clips[1].len, clips[1].trim_in), (2.5, 3.5, 2.5));
         assert_gapless(&state);
+    }
+
+    #[test]
+    fn added_tracks_group_and_renumber() {
+        let mut state = TimelineState::default();
+        state.add_track(TrackKind::Video);
+        state.add_track(TrackKind::Audio);
+
+        let names: Vec<&str> = state.tracks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["V1", "V2", "A1", "A2"]);
+    }
+
+    #[test]
+    fn moving_a_track_reorders_and_renumbers() {
+        let mut state = TimelineState::default();
+        state.add_track(TrackKind::Video);
+        // V2 is at index 1; move it above V1.
+        state.move_track(1, -1);
+
+        assert_eq!(state.selected_track, 0);
+        let names: Vec<&str> = state.tracks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["V1", "V2", "A1"]);
+    }
+
+    #[test]
+    fn upper_video_track_wins_the_program() {
+        let mut state = TimelineState::default();
+        state.add_track(TrackKind::Video);
+
+        let mut top = asset("top", 4.0);
+        top.path = Some(PathBuf::from("top.mp4"));
+        let mut under = asset("under", 4.0);
+        under.path = Some(PathBuf::from("under.mp4"));
+
+        state.place(0, &top, 0.0);
+        state.place(1, &under, 0.0);
+
+        let program = state.program();
+        assert_eq!(program.len(), 1);
+        assert_eq!(program[0].path, PathBuf::from("top.mp4"));
+
+        // After reordering, the other track composites on top.
+        state.move_track(1, -1);
+        assert_eq!(state.program()[0].path, PathBuf::from("under.mp4"));
+    }
+
+    #[test]
+    fn the_last_track_cannot_be_removed() {
+        let mut state = TimelineState::default();
+        state.remove_track(1);
+        state.remove_track(0);
+        assert_eq!(state.tracks.len(), 1);
+    }
+
+    #[test]
+    fn span_follows_the_content() {
+        let mut state = TimelineState::default();
+        let empty = state.seconds;
+        state.place(0, &asset("a", 4.0), 0.0);
+        let with_clip = state.seconds;
+
+        assert!(with_clip < empty, "span should shrink to a 4s clip");
+        assert!(with_clip >= 4.0, "the clip must still fit");
+        assert!(with_clip <= 4.0 * 1.5, "and not float in dead space");
+
+        state.tracks[0].clips[0].selected = true;
+        state.delete_selected();
+        assert_eq!(state.seconds, empty);
     }
 
     #[test]

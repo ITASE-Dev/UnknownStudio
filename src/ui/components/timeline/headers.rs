@@ -26,7 +26,7 @@ pub fn track_header(
     muted: &mut bool,
 ) -> Response {
     let w = header_width(ui);
-    track_header_sized(ui, name, kind, locked, muted, w)
+    track_header_sized(ui, name, kind, locked, muted, w, false)
 }
 
 /// Header at an explicit width. Detail drops out progressively as `width` shrinks:
@@ -38,6 +38,7 @@ pub fn track_header_sized(
     locked: &mut bool,
     muted: &mut bool,
     width: f32,
+    selected: bool,
 ) -> Response {
     let width = width.max(40.0);
     let h = track_height(ui);
@@ -48,7 +49,8 @@ pub fn track_header_sized(
     let icons_below = width >= 88.0 && h >= 48.0;
     let show_icons = width >= 62.0;
 
-    p.rect_filled(rect, Rounding::ZERO, BG_PANEL);
+    let fill = if selected { BG_SUNKEN } else { BG_PANEL };
+    p.rect_filled(rect, Rounding::ZERO, fill);
     p.line_segment(
         [rect.right_top(), rect.right_bottom()],
         Stroke::new(1.0_f32, BORDER),
@@ -63,7 +65,9 @@ pub fn track_header_sized(
         TrackKind::Audio => CLIP_AUDIO,
     };
     p.rect_filled(
-        Rect::from_min_size(rect.min, Vec2::new(3.0, rect.height())),
+        // The accent rail widens on the selected track: the toolbar's
+        // reorder and remove actions apply to it.
+        Rect::from_min_size(rect.min, Vec2::new(if selected { 5.0 } else { 3.0 }, rect.height())),
         Rounding::ZERO,
         accent.linear_multiply(if *muted { 0.35 } else { 1.0 }),
     );

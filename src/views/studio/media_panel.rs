@@ -19,6 +19,7 @@ pub struct Asset {
     pub path: Option<PathBuf>,
     pub kind: MediaKind,
     pub seconds: f32,
+    pub has_audio: bool,
 }
 
 impl Asset {
@@ -31,6 +32,7 @@ impl Asset {
             path: None,
             kind,
             seconds,
+            has_audio: kind == MediaKind::Audio,
         }
     }
 
@@ -43,6 +45,7 @@ impl Asset {
             path: Some(media.path),
             kind: media.kind,
             seconds: media.seconds,
+            has_audio: media.has_audio,
         }
     }
 
@@ -61,6 +64,7 @@ impl Asset {
             path: self.path.clone(),
             seconds: self.seconds.max(0.2),
             kind: self.clip_kind(),
+            has_audio: self.has_audio,
         }
     }
 }

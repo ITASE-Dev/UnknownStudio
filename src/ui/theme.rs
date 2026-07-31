@@ -50,7 +50,16 @@ pub mod tokens {
 
 use tokens::*;
 
+/// Appends Phosphor to the proportional family, so icon glyphs can be used
+/// inline in any `RichText` and fall back to the UI font for everything else.
+fn install_icon_font(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    ctx.set_fonts(fonts);
+}
+
 pub fn apply(ctx: &egui::Context) {
+    install_icon_font(ctx);
     let mut style = (*ctx.style()).clone();
 
     style.text_styles = [

@@ -7,7 +7,7 @@ pub mod probe;
 pub mod textures;
 
 pub use decoder::{Quality, RgbFrame, VideoDecoder};
-pub use engine::{Decoded, PreviewEngine, Segment};
+pub use engine::{Decoded, PreviewEngine, Segment, FILMSTRIP_FRAMES};
 pub use probe::{probe_media, MediaInfo};
 pub use textures::{Poster, Textures};
 

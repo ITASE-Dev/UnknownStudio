@@ -1,6 +1,7 @@
 pub mod clip;
 pub mod headers;
 pub mod markers;
+pub mod tools;
 
 use crate::ui::theme::tokens::*;
 use eframe::egui::{
@@ -157,14 +158,40 @@ pub fn clip_rect(lane: Rect, start: f32, len: f32, px_per_sec: f32) -> Rect {
 
 /// Deterministic mirrored-bar waveform; bar density follows the clip width.
 pub fn waveform(p: &egui::Painter, rect: Rect, base: Color32) {
+    waveform_peaks(p, rect, base, None);
+}
+
+/// Waveform from measured peaks when they are available, falling back to the
+/// synthetic pattern while analysis is still running.
+///
+/// `peaks` covers the whole source file; `window` is the `[from, to)` fraction
+/// of it this clip shows, so a trimmed clip draws its own section.
+pub fn waveform_peaks(
+    p: &egui::Painter,
+    rect: Rect,
+    base: Color32,
+    peaks: Option<(&[f32], f32, f32)>,
+) {
     let mid = rect.center().y;
     let (bar, gap) = if rect.width() < 90.0 { (2.0, 1.0) } else { (3.0, 2.0) };
     let n = ((rect.width() + gap) / (bar + gap)).floor().max(1.0) as usize;
     let col = Color32::from_white_alpha(200);
     for i in 0..n {
         let f = i as f32;
-        let a = (f * 0.7).sin() * 0.5 + (f * 0.23).cos() * 0.35 + (f * 1.9).sin() * 0.15;
-        let h = (a.abs() * rect.height() * 0.5).max(1.0);
+        let amplitude = match peaks {
+            // Each bar takes the loudest peak in the slice it covers, so
+            // transients survive downsampling to bar resolution.
+            Some((peaks, from, to)) if !peaks.is_empty() => {
+                let span = (to - from).max(f32::EPSILON);
+                let lo = from + span * (i as f32 / n as f32);
+                let hi = from + span * ((i + 1) as f32 / n as f32);
+                let start = ((lo * peaks.len() as f32) as usize).min(peaks.len() - 1);
+                let end = ((hi * peaks.len() as f32).ceil() as usize).clamp(start + 1, peaks.len());
+                peaks[start..end].iter().fold(0.0f32, |m, v| m.max(*v))
+            }
+            _ => (f * 0.7).sin() * 0.5 + (f * 0.23).cos() * 0.35 + (f * 1.9).sin() * 0.15,
+        };
+        let h = (amplitude.abs() * rect.height() * 0.5).max(1.0);
         let x = rect.left() + f * (bar + gap);
         p.rect_filled(
             Rect::from_min_max(Pos2::new(x, mid - h), Pos2::new(x + bar, mid + h)),

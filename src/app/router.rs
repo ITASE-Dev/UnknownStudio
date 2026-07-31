@@ -1,4 +1,6 @@
-pub type ProjectId = u32;
+/// Stable hash of a project's on-disk folder name. Numeric so `AppRoute`
+/// stays `Copy`; resolve it through `ProjectLibrary::find`.
+pub type ProjectId = u64;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum AppRoute {

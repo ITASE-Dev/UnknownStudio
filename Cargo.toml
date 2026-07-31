@@ -13,10 +13,16 @@ ffmpeg-next = "8.1"
 reqwest = { version = "0.12", features = ["blocking", "json", "multipart"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "rt-multi-thread"] }
 uuid = { version = "1.8", features = ["v4"] }
 
 # media ingest
 rfd = "0.14"
+
+# audio_engine
+cpal = "0.15"
+egui-phosphor = "0.5"
+directories = "5"
 
 # Decode/analysis hot loops are unusably slow in an unoptimized debug build.
 [profile.dev]

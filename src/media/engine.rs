@@ -12,6 +12,9 @@ use std::thread;
 /// Decoders kept open so segment changes don't reopen files.
 const MAX_OPEN_DECODERS: usize = 4;
 
+/// Frames sampled across a source for its timeline filmstrip.
+pub const FILMSTRIP_FRAMES: usize = 16;
+
 /// One flattened piece of the program: `[start, end)` of timeline seconds
 /// showing `path` from `media_start`.
 #[derive(Clone, PartialEq, Debug)]
@@ -32,6 +35,13 @@ impl Segment {
     }
 }
 
+enum ThumbRequest {
+    /// Single poster frame for the media pool.
+    Poster(PathBuf),
+    /// `FILMSTRIP_FRAMES` frames spread across the source, for clip bodies.
+    Filmstrip(PathBuf),
+}
+
 enum FrameRequest {
     Program(Vec<Segment>),
     Frame { seconds: f32, quality: Quality },
@@ -42,13 +52,19 @@ pub enum Decoded {
     Frame { seconds: f32, frame: RgbFrame },
     /// Pool thumbnail for `path`.
     Thumbnail { path: PathBuf, frame: RgbFrame },
+    /// Filmstrip frame `index` of `FILMSTRIP_FRAMES` for `path`.
+    FilmstripFrame {
+        path: PathBuf,
+        index: usize,
+        frame: RgbFrame,
+    },
     /// Nothing to show at this instant (gap or unreadable source).
     Blank { seconds: f32 },
 }
 
 pub struct PreviewEngine {
     frames_tx: Sender<FrameRequest>,
-    thumbs_tx: Sender<PathBuf>,
+    thumbs_tx: Sender<ThumbRequest>,
     decoded_rx: Receiver<Decoded>,
     /// Last program handed to the worker; resending an identical one would
     /// reset its decoder pool for nothing.
@@ -64,7 +80,7 @@ impl Default for PreviewEngine {
 impl PreviewEngine {
     pub fn new() -> Self {
         let (frames_tx, frames_rx) = mpsc::channel::<FrameRequest>();
-        let (thumbs_tx, thumbs_rx) = mpsc::channel::<PathBuf>();
+        let (thumbs_tx, thumbs_rx) = mpsc::channel::<ThumbRequest>();
         let (decoded_tx, decoded_rx) = mpsc::channel::<Decoded>();
 
         spawn_frame_thread(frames_rx, decoded_tx.clone());
@@ -96,7 +112,12 @@ impl PreviewEngine {
     }
 
     pub fn request_thumbnail(&self, path: PathBuf) {
-        let _ = self.thumbs_tx.send(path);
+        let _ = self.thumbs_tx.send(ThumbRequest::Poster(path));
+    }
+
+    /// Queues the frames a clip body draws. Cheap to call once per source.
+    pub fn request_filmstrip(&self, path: PathBuf) {
+        let _ = self.thumbs_tx.send(ThumbRequest::Filmstrip(path));
     }
 
     /// Non-blocking drain of finished work.
@@ -182,23 +203,56 @@ fn spawn_frame_thread(requests: Receiver<FrameRequest>, out: Sender<Decoded>) {
     });
 }
 
-fn spawn_thumb_thread(requests: Receiver<PathBuf>, out: Sender<Decoded>) {
+fn spawn_thumb_thread(requests: Receiver<ThumbRequest>, out: Sender<Decoded>) {
     thread::spawn(move || {
         init_ffmpeg();
 
-        while let Ok(path) = requests.recv() {
+        while let Ok(request) = requests.recv() {
+            let path = match &request {
+                ThumbRequest::Poster(path) | ThumbRequest::Filmstrip(path) => path.clone(),
+            };
             let Ok(mut decoder) = VideoDecoder::new(&path.to_string_lossy()) else {
                 continue;
             };
-            // A frame slightly inside the file: many clips open on black.
-            let second = (decoder.duration_seconds() * 0.1).min(1.0);
-            let Some(frame) = decoder
-                .frame_at(second, Quality::Thumb)
-                .or_else(|| decoder.frame_at(0.0, Quality::Thumb))
-            else {
-                continue;
+            let duration = decoder.duration_seconds().max(0.001);
+
+            let sent = match request {
+                ThumbRequest::Poster(_) => {
+                    // Slightly inside the file: many clips open on black.
+                    let second = (duration * 0.1).min(1.0);
+                    match decoder
+                        .frame_at(second, Quality::Thumb)
+                        .or_else(|| decoder.frame_at(0.0, Quality::Thumb))
+                    {
+                        Some(frame) => out.send(Decoded::Thumbnail { path, frame }).is_ok(),
+                        None => true,
+                    }
+                }
+                ThumbRequest::Filmstrip(_) => {
+                    // Sampled at slice centres so the first tile isn't the
+                    // (often black) very first frame.
+                    let mut alive = true;
+                    for index in 0..FILMSTRIP_FRAMES {
+                        let second = duration * (index as f64 + 0.5) / FILMSTRIP_FRAMES as f64;
+                        let Some(frame) = decoder.frame_at(second, Quality::Thumb) else {
+                            continue;
+                        };
+                        alive = out
+                            .send(Decoded::FilmstripFrame {
+                                path: path.clone(),
+                                index,
+                                frame,
+                            })
+                            .is_ok();
+                        if !alive {
+                            break;
+                        }
+                    }
+                    alive
+                }
             };
-            if out.send(Decoded::Thumbnail { path, frame }).is_err() {
+
+            if !sent {
                 return;
             }
         }

@@ -1,5 +1,5 @@
 use crate::app::modals::Modals;
-use crate::app::router::AppRoute;
+use crate::app::router::{AppRoute, ProjectId};
 use crate::app::Project;
 use crate::ui::core::buttons::{ghost_button, pro_button};
 use crate::ui::core::inputs::search_input;
@@ -14,7 +14,7 @@ use eframe::egui::{
 #[derive(Default)]
 pub struct DashboardState {
     pub search: String,
-    pub selected: Option<u32>,
+    pub selected: Option<ProjectId>,
 }
 
 pub fn show(
@@ -22,9 +22,12 @@ pub fn show(
     route: &mut AppRoute,
     state: &mut DashboardState,
     projects: &[Project],
+    error: Option<&str>,
     modals: &mut Modals,
 ) {
-    super::page(ctx, 1100.0, |ui| content(ui, route, state, projects, modals));
+    super::page(ctx, 1100.0, |ui| {
+        content(ui, route, state, projects, error, modals)
+    });
 }
 
 pub fn content(
@@ -32,10 +35,20 @@ pub fn content(
     route: &mut AppRoute,
     state: &mut DashboardState,
     projects: &[Project],
+    error: Option<&str>,
     modals: &mut Modals,
 ) {
     header(ui, route, state);
     ui.add_space(14.0);
+
+    if let Some(error) = error {
+        ui.label(
+            RichText::new(format!("Project folder unavailable: {error}"))
+                .small()
+                .color(ERR),
+        );
+        ui.add_space(8.0);
+    }
 
     let needle = state.search.trim().to_lowercase();
     let visible: Vec<&Project> = projects
@@ -48,8 +61,8 @@ pub fn content(
         return;
     }
 
-    let mut open: Option<u32> = None;
-    let mut clicked: Option<u32> = None;
+    let mut open: Option<ProjectId> = None;
+    let mut clicked: Option<ProjectId> = None;
     grid(ui, visible.len(), 230.0, 320.0, |ui, i, w| {
         let p = visible[i];
         let resp = project_card(ui, p, w, state.selected == Some(p.id));

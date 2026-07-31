@@ -199,8 +199,8 @@ fn timeline(ui: &mut Ui, state: &mut GalleryState) {
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 ui.add_space(20.0);
-                track_header_sized(ui, "V1", TrackKind::Video, &mut state.v1_locked, &mut state.v1_muted, head_w);
-                track_header_sized(ui, "A1", TrackKind::Audio, &mut state.a1_locked, &mut state.a1_muted, head_w);
+                track_header_sized(ui, "V1", TrackKind::Video, &mut state.v1_locked, &mut state.v1_muted, head_w, false);
+                track_header_sized(ui, "A1", TrackKind::Audio, &mut state.a1_locked, &mut state.a1_muted, head_w, false);
             });
             ScrollArea::horizontal()
                 .id_source("gallery_timeline")

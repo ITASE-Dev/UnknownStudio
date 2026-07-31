@@ -24,3 +24,9 @@ desktop.ini
 # Local environment overrides
 .env
 .env.local
+
+
+# Test environment Exclude
+/tmp_tools/
+/examples/
+/unknown/
