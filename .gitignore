@@ -24,9 +24,11 @@ desktop.ini
 # Local environment overrides
 .env
 .env.local
+.env.example
 
 
 # Test environment Exclude
 /tmp_tools/
 /examples/
 /unknown/
+/Data.Blueprint/

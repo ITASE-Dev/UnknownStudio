@@ -23,6 +23,8 @@ rfd = "0.14"
 cpal = "0.15"
 egui-phosphor = "0.5"
 directories = "5"
+thiserror = "2.0.19"
+dotenvy = "0.15.7"
 
 # Decode/analysis hot loops are unusably slow in an unoptimized debug build.
 [profile.dev]

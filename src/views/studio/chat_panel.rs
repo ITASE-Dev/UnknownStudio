@@ -1,121 +1,179 @@
+//! Director chat: conversation state, the async bridge, and the transcript UI.
+//!
+//! Nothing here blocks. A submitted prompt is handed to `ChatBridge`; replies
+//! arrive on later frames through `poll`.
+
+use crate::ai_tooling::chat::{ChatBridge, ChatEvent, ChatSession, Message, Role};
 use crate::ui::components::chat::{
-    ai_chat_bubble, prompt_input_area, typing_indicator, user_chat_bubble,
+    typing_indicator, AiChatBubble, NoticeBubble, PromptInputArea, UserChatBubble,
 };
-use crate::ui::components::status::{job_progress, service_status_bar, ServiceState};
+use crate::ui::components::status::{service_status_bar, ServiceState};
 use crate::ui::core::typography::{hairline_rule, section_header};
 use crate::ui::theme::tokens::*;
 use eframe::egui::{RichText, ScrollArea, Ui};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Author {
-    User,
-    Director,
-}
+/// Standing instructions for the editing assistant.
+const SYSTEM_PROMPT: &str = "You are the AI director inside Unknown Studio, a video editor. \
+Answer as an editor would: concrete, short, and about the cut in front of you. \
+Reply in the language the user writes in. Never invent timecodes or clip names you were not given.";
 
-pub struct Message {
-    pub author: Author,
-    pub body: String,
-}
+/// Height reserved for the composer so the transcript can claim the rest.
+const COMPOSER_HEIGHT: f32 = 126.0;
 
 pub struct ChatState {
-    pub messages: Vec<Message>,
+    /// Conversation history, pruned to the model's context budget.
+    pub session: ChatSession,
     pub prompt: String,
-    pub thinking: bool,
+    /// A completion is in flight; the composer stays disabled until it lands.
+    pub waiting: bool,
+    /// Last transport or configuration failure, shown below the transcript.
+    pub error: Option<String>,
+    /// `None` when the assistant could not be configured (no API key).
+    bridge: Option<ChatBridge>,
 }
 
 impl Default for ChatState {
     fn default() -> Self {
+        let (bridge, error) = match ChatBridge::from_env() {
+            Ok(bridge) => (Some(bridge), None),
+            Err(err) => (None, Some(err.to_string())),
+        };
+
         Self {
-            messages: vec![
-                Message {
-                    author: Author::Director,
-                    body: "Ingested 34 clips and 2 audio stems. Rough assembly is on V1 with silences already pulled.".into(),
-                },
-                Message {
-                    author: Author::User,
-                    body: "Cut the first minute to 40 seconds, keep the hook.".into(),
-                },
-                Message {
-                    author: Author::Director,
-                    body: "Trimmed 22s of silence and dropped two redundant takes. Added generative B-Roll over the product mention at 00:18 — Identity Lock kept the presenter untouched.".into(),
-                },
-            ],
+            session: ChatSession::with_system(SYSTEM_PROMPT),
             prompt: String::new(),
-            thinking: true,
+            waiting: false,
+            error,
+            bridge,
         }
     }
 }
 
 impl ChatState {
-    fn push_user(&mut self, body: String) {
-        self.messages.push(Message { author: Author::User, body });
-        self.messages.push(Message {
-            author: Author::Director,
-            body: "Queued. I'll re-time the affected range and report the new duration.".into(),
-        });
+    pub fn is_online(&self) -> bool {
+        self.bridge.is_some()
+    }
+
+    /// Turns rendered in the transcript, oldest first.
+    pub fn history(&self) -> &[Message] {
+        self.session.history()
+    }
+
+    /// Replaces the conversation, e.g. when a project is opened.
+    pub fn restore(&mut self, messages: impl IntoIterator<Item = Message>) {
+        self.session.restore(messages);
+        self.session.set_system(SYSTEM_PROMPT);
+        self.waiting = false;
+    }
+
+    /// Records the turn and asks the worker for a reply.
+    pub fn submit(&mut self, prompt: String) {
+        self.session.push_user(prompt);
+        self.error = None;
+
+        let Some(bridge) = &self.bridge else {
+            self.error = Some("Assistant offline: set OPENAI_API_KEY in .env.".into());
+            return;
+        };
+
+        // A dead worker must not leave the composer disabled forever.
+        self.waiting = bridge.request(self.session.context());
+        if !self.waiting {
+            self.error = Some("Assistant stopped responding; restart the app.".into());
+        }
+    }
+
+    /// Drains finished completions. Call once per frame, before drawing.
+    pub fn poll(&mut self) {
+        let Some(bridge) = &self.bridge else {
+            return;
+        };
+
+        for event in bridge.poll().collect::<Vec<_>>() {
+            self.waiting = false;
+            match event {
+                ChatEvent::Reply(message) => self.session.push(message),
+                ChatEvent::Failed(reason) => self.error = Some(reason),
+            }
+        }
     }
 }
 
 pub fn show(ui: &mut Ui, state: &mut ChatState, time: f32) {
+    state.poll();
+
     ui.horizontal(|ui| {
         section_header(ui, "Director");
     });
     service_status_bar(
         ui,
-        &[
-            ("LLM Director", ServiceState::Online),
-            ("ComfyUI", ServiceState::Working),
-        ],
+        &[(
+            "LLM Director",
+            if state.is_online() {
+                ServiceState::Online
+            } else {
+                ServiceState::Error
+            },
+        )],
         time,
     );
     ui.add_space(6.0);
     hairline_rule(ui);
     ui.add_space(8.0);
 
-    // Composer is measured first so the transcript can claim the rest.
-    let composer_h = 126.0;
-    let transcript_h = (ui.available_height() - composer_h).max(80.0);
+    transcript(ui, state, time);
+
+    ui.add_space(6.0);
+    match &state.error {
+        Some(error) => {
+            NoticeBubble::show(ui, error);
+        }
+        None => {
+            ui.label(
+                RichText::new("Edits apply to the timeline; nothing renders until you export.")
+                    .small()
+                    .color(TEXT_DISABLED),
+            );
+        }
+    }
+    ui.add_space(4.0);
+
+    // Disabled while a completion is in flight: one request at a time keeps
+    // replies in the same order as the turns on screen.
+    if let Some(prompt) = PromptInputArea::show(ui, &mut state.prompt, !state.waiting) {
+        state.submit(prompt);
+    }
+}
+
+fn transcript(ui: &mut Ui, state: &ChatState, time: f32) {
+    let height = (ui.available_height() - COMPOSER_HEIGHT).max(80.0);
 
     ScrollArea::vertical()
         .auto_shrink([false, false])
-        .max_height(transcript_h)
+        .max_height(height)
         .stick_to_bottom(true)
+        .id_source("director_transcript")
         .show(ui, |ui| {
-            for m in &state.messages {
-                match m.author {
-                    Author::User => {
-                        user_chat_bubble(ui, &m.body);
-                    }
-                    Author::Director => {
-                        ai_chat_bubble(ui, "Director", &m.body);
-                    }
-                }
+            if state.history().is_empty() {
+                ui.label(
+                    RichText::new("Ask for a cut, a pacing pass, or B-roll.")
+                        .small()
+                        .color(TEXT_DISABLED),
+                );
+            }
+
+            for message in state.history() {
+                match message.role {
+                    Role::User => UserChatBubble::show(ui, &message.content),
+                    Role::Assistant => AiChatBubble::show(ui, &message.content),
+                    // The system prompt is context, not conversation.
+                    Role::System => continue,
+                };
                 ui.add_space(8.0);
             }
-            if state.thinking {
+
+            if state.waiting {
                 typing_indicator(ui, time);
-                ui.add_space(4.0);
-                job_progress(ui, "Re-timing V1 · 3 of 8 edits", 0.42);
             }
         });
-
-    ui.add_space(6.0);
-    ui.label(
-        RichText::new("Edits apply to the timeline; nothing renders until you export.")
-            .small()
-            .color(TEXT_DISABLED),
-    );
-    ui.add_space(4.0);
-    let mut sent: Option<String> = None;
-    let prompt_snapshot = state.prompt.clone();
-    if prompt_input_area(ui, &mut state.prompt) {
-        sent = Some(prompt_snapshot);
-    }
-    if let Some(body) = sent {
-        let body = body.trim().to_owned();
-        if !body.is_empty() {
-            state.push_user(body);
-            state.thinking = true;
-        }
-    }
 }

@@ -140,7 +140,7 @@ impl AiDirectorApp {
         let context = open.context.clone();
         let save = library::ProjectSave {
             timeline: persistence::to_snapshot(&self.studio.timeline, &context),
-            chat: persistence::chat_to_disk(&self.ai.history),
+            chat: persistence::chat_to_disk(self.studio.chat.history()),
         };
         self.dirty_since = None;
         self.library.save_open(save);
@@ -163,13 +163,13 @@ impl AiDirectorApp {
             let timeline = open.config.timeline.clone();
             let chat = open.saved_chat.clone();
             persistence::apply_snapshot(&mut self.studio.timeline, &timeline, &context);
-            self.ai.history = persistence::chat_from_disk(&chat);
+            self.studio.chat.restore(persistence::chat_from_disk(&chat));
             self.dirty_since = None;
             return;
         }
 
         let timeline = persistence::to_snapshot(&self.studio.timeline, &context);
-        let chat = persistence::chat_to_disk(&self.ai.history);
+        let chat = persistence::chat_to_disk(self.studio.chat.history());
         let changed = timeline != open.saved_timeline || chat != open.saved_chat;
 
         match (changed, self.dirty_since) {

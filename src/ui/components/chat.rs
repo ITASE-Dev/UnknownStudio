@@ -6,6 +6,50 @@ use eframe::egui::{
     self, Align, Layout, Margin, Pos2, Response, RichText, Rounding, Sense, Stroke, Ui, Vec2,
 };
 
+/// Namespaced entry points for the chat surface. Each delegates to the free
+/// function below it, so the components stay usable either way.
+pub struct AiChatBubble;
+pub struct UserChatBubble;
+pub struct NoticeBubble;
+pub struct PromptInputArea;
+
+impl AiChatBubble {
+    pub const AUTHOR: &'static str = "Director";
+
+    pub fn show(ui: &mut Ui, text: &str) -> Response {
+        ai_chat_bubble(ui, Self::AUTHOR, text)
+    }
+
+    pub fn show_as(ui: &mut Ui, author: &str, text: &str) -> Response {
+        ai_chat_bubble(ui, author, text)
+    }
+}
+
+impl UserChatBubble {
+    pub fn show(ui: &mut Ui, text: &str) -> Response {
+        user_chat_bubble(ui, text)
+    }
+}
+
+impl NoticeBubble {
+    /// Out-of-band message (a failure, a status note). Deliberately unlike the
+    /// assistant bubble: it is not part of the conversation the model sees.
+    pub fn show(ui: &mut Ui, text: &str) -> Response {
+        notice_bubble(ui, text)
+    }
+}
+
+impl PromptInputArea {
+    /// Returns the submitted prompt, clearing the field.
+    pub fn show(ui: &mut Ui, text: &mut String, enabled: bool) -> Option<String> {
+        let pending = text.trim().to_owned();
+        let submitted = ui
+            .add_enabled_ui(enabled, |ui| prompt_input_area(ui, text))
+            .inner;
+        (submitted && !pending.is_empty()).then_some(pending)
+    }
+}
+
 /// Bubble measure: most of the row, capped so long lines stay readable.
 pub fn bubble_width(ui: &Ui) -> f32 {
     let avail = ui.available_width();
@@ -61,6 +105,20 @@ pub fn user_chat_bubble_sized(ui: &mut Ui, body: &str, max_width: f32) -> Respon
             .response
     })
     .inner
+}
+
+/// Full-width notice plate for failures and system messages.
+pub fn notice_bubble(ui: &mut Ui, body: &str) -> Response {
+    egui::Frame::none()
+        .fill(BG_PANEL)
+        .stroke(Stroke::new(1.0_f32, ERR.linear_multiply(0.55)))
+        .rounding(R_SM)
+        .inner_margin(Margin::symmetric(10.0, 8.0))
+        .show(ui, |ui| {
+            ui.set_max_width(ui.available_width());
+            ui.label(RichText::new(body).small().color(ERR));
+        })
+        .response
 }
 
 /// Three-dot "thinking" indicator; `time` drives the phase offsets.

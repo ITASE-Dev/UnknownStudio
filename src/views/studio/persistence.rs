@@ -1,5 +1,6 @@
 //! Conversion between the studio's runtime timeline and the on-disk snapshot.
 
+use crate::ai_tooling::chat::{Message, Role};
 use crate::views::studio::timeline_panel::{Clip, TimelineState, Track};
 use crate::workspace::{
     ChatHistory, ChatMessage, ClipKind as DiskClipKind, ClipSnapshot, ProjectContext,
@@ -101,29 +102,31 @@ fn track_from_disk(track: &TrackSnapshot, ctx: &ProjectContext) -> Track {
     }
 }
 
-/// Chat turns → durable history.
-pub fn chat_to_disk(turns: &[crate::action_engine::ChatTurn]) -> ChatHistory {
+/// Conversation → durable history. The system prompt is a constant the panel
+/// re-applies on load, so it is not stored.
+pub fn chat_to_disk(messages: &[Message]) -> ChatHistory {
     ChatHistory {
-        messages: turns
+        messages: messages
             .iter()
-            .map(|turn| {
-                if turn.from_user {
-                    ChatMessage::user(turn.text.clone())
-                } else {
-                    ChatMessage::assistant(turn.text.clone())
-                }
+            .filter_map(|message| match message.role {
+                Role::User => Some(ChatMessage::user(message.content.clone())),
+                Role::Assistant => Some(ChatMessage::assistant(message.content.clone())),
+                Role::System => None,
             })
             .collect(),
     }
 }
 
-pub fn chat_from_disk(history: &ChatHistory) -> Vec<crate::action_engine::ChatTurn> {
+pub fn chat_from_disk(history: &ChatHistory) -> Vec<Message> {
     history
         .messages
         .iter()
-        .map(|message| crate::action_engine::ChatTurn {
-            from_user: message.from_user,
-            text: message.text.clone(),
+        .map(|message| {
+            if message.from_user {
+                Message::user(message.text.clone())
+            } else {
+                Message::assistant(message.text.clone())
+            }
         })
         .collect()
 }
