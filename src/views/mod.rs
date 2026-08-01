@@ -6,6 +6,7 @@ pub mod dashboard;
 pub mod gallery;
 pub mod growth;
 pub mod onboarding;
+pub mod settings;
 pub mod studio;
 
 use crate::ui::core::typography::content_column;

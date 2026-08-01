@@ -5,11 +5,11 @@
 
 use crate::ai_tooling::orchestration::{
     apply_actions_with_worker, ActionCommand, AsyncJob, DispatchReport, DispatcherError,
-    EditorState, Marker,
+    EditorState, Marker, TextAnimation, TextStyle,
 };
 use crate::views::studio::dnd::DragAsset;
 use crate::views::studio::media_panel::{Asset, MediaState};
-use crate::views::studio::timeline_panel::{TimelineMarker, TimelineState};
+use crate::views::studio::timeline_panel::{TimelineMarker, TimelineState, TimelineText};
 use std::sync::mpsc::Sender;
 
 /// Mutable view of the editor for one dispatch batch.
@@ -125,6 +125,49 @@ impl EditorState for StudioEditor<'_> {
 
     fn set_playhead(&mut self, time_sec: f32) {
         self.timeline.playhead = time_sec.clamp(0.0, self.timeline.seconds);
+    }
+
+    fn add_text(
+        &mut self,
+        start_sec: f32,
+        end_sec: f32,
+        text: &str,
+        animation: TextAnimation,
+        style: TextStyle,
+    ) -> Result<(), DispatcherError> {
+        self.timeline.add_text(TimelineText {
+            start: start_sec,
+            end: end_sec,
+            text: text.to_string(),
+            animation,
+            style,
+        });
+        Ok(())
+    }
+
+    /// Drops an effect on the first free audio lane. The id must resolve to a
+    /// pool asset: the engine names effects, the user supplies the files.
+    fn add_audio(
+        &mut self,
+        start_sec: f32,
+        file_id: &str,
+        _volume_db: f32,
+    ) -> Result<(), DispatcherError> {
+        let payload = self
+            .asset(file_id)
+            .ok_or_else(|| {
+                DispatcherError::UnknownAsset(format!(
+                    "{file_id} — import a sound with this name to place it"
+                ))
+            })?
+            .drag_payload();
+
+        let track = self.timeline.first_audio_track().ok_or_else(|| {
+            DispatcherError::Rejected("no unlocked audio track to place the effect on".into())
+        })?;
+
+        self.timeline.place(track, &payload, start_sec);
+        Ok(())
     }
 
     fn place_asset(

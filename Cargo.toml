@@ -32,9 +32,14 @@ futures-util = "0.3.33"
 #   cargo build --features visual-analysis
 opencv = { version = "0.93", optional = true, default-features = false, features = ["videoio", "imgproc"] }
 
+# audio_analysis — needs a whisper.cpp build, so it is opt-in:
+#   cargo build --features audio-analysis
+whisper-rs = { version = "0.14", optional = true }
+
 [features]
 default = []
 visual-analysis = ["dep:opencv"]
+audio-analysis = ["dep:whisper-rs"]
 
 # Decode/analysis hot loops are unusably slow in an unoptimized debug build.
 [profile.dev]

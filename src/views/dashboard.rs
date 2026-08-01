@@ -1,7 +1,8 @@
 use crate::app::modals::Modals;
 use crate::app::router::{AppRoute, ProjectId};
 use crate::app::Project;
-use crate::ui::core::buttons::{ghost_button, pro_button};
+use crate::ui::core::buttons::{ghost_button, icon_button, pro_button};
+use crate::ui::core::icons;
 use crate::ui::core::inputs::search_input;
 use crate::ui::core::typography::{hairline_rule, panel, section_title};
 use crate::ui::responsive::{breakpoint, elided_galley, grid};
@@ -17,6 +18,7 @@ pub struct DashboardState {
     pub selected: Option<ProjectId>,
 }
 
+/// Returns true when the user asked for the settings form.
 pub fn show(
     ctx: &egui::Context,
     route: &mut AppRoute,
@@ -24,10 +26,12 @@ pub fn show(
     projects: &[Project],
     error: Option<&str>,
     modals: &mut Modals,
-) {
+) -> bool {
+    let mut open_settings = false;
     super::page(ctx, 1100.0, |ui| {
-        content(ui, route, state, projects, error, modals)
+        open_settings = content(ui, route, state, projects, error, modals);
     });
+    open_settings
 }
 
 pub fn content(
@@ -37,8 +41,8 @@ pub fn content(
     projects: &[Project],
     error: Option<&str>,
     modals: &mut Modals,
-) {
-    header(ui, route, state);
+) -> bool {
+    let open_settings = header(ui, route, state);
     ui.add_space(14.0);
 
     if let Some(error) = error {
@@ -58,7 +62,7 @@ pub fn content(
 
     if visible.is_empty() {
         empty_state(ui, route, &state.search);
-        return;
+        return open_settings;
     }
 
     let mut open: Option<ProjectId> = None;
@@ -78,7 +82,7 @@ pub fn content(
     }
     if let Some(id) = open {
         *route = AppRoute::Studio(id);
-        return;
+        return open_settings;
     }
 
     ui.add_space(16.0);
@@ -93,31 +97,47 @@ pub fn content(
                 .color(TEXT_DISABLED),
         );
     }
+
+    open_settings
 }
 
-fn header(ui: &mut Ui, route: &mut AppRoute, state: &mut DashboardState) {
+/// Returns true when the settings button was pressed.
+fn header(ui: &mut Ui, route: &mut AppRoute, state: &mut DashboardState) -> bool {
+    let mut open_settings = false;
+
     if breakpoint(ui).is_compact() {
         section_title(ui, "Projects", "");
         ui.horizontal(|ui| {
             search_input(ui, &mut state.search, "Search projects…");
+            open_settings |= settings_button(ui);
         });
         ui.add_space(6.0);
         if pro_button(ui, "New Project", true).clicked() {
             *route = AppRoute::Onboarding;
         }
-        return;
+        return open_settings;
     }
+
     ui.horizontal(|ui| {
         ui.label(RichText::new("Projects").heading().strong().color(TEXT_PRIMARY));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if pro_button(ui, "New Project", true).clicked() {
                 *route = AppRoute::Onboarding;
             }
+            open_settings |= settings_button(ui);
             search_input(ui, &mut state.search, "Search projects…");
         });
     });
     ui.add_space(8.0);
     hairline_rule(ui);
+    open_settings
+}
+
+/// Where API keys are entered — the only entry point to the credentials form.
+fn settings_button(ui: &mut Ui) -> bool {
+    icon_button(ui, icons::SETTINGS, true, false)
+        .on_hover_text("Settings · API keys")
+        .clicked()
 }
 
 fn selected_actions(ui: &mut Ui, route: &mut AppRoute, modals: &mut Modals, p: &Project) {

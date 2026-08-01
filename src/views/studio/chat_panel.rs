@@ -71,6 +71,21 @@ impl ChatState {
         self.session.history()
     }
 
+    /// Rebuilds the worker with new credentials, keeping the conversation.
+    pub fn reconnect(&mut self, config: &crate::ai_tooling::AiToolingConfig) {
+        match ChatBridge::from_config(config) {
+            Ok(bridge) => {
+                self.bridge = Some(bridge);
+                self.error = None;
+            }
+            Err(err) => {
+                self.bridge = None;
+                self.error = Some(err.to_string());
+            }
+        }
+        self.waiting = false;
+    }
+
     /// Replaces the conversation, e.g. when a project is opened.
     pub fn restore(&mut self, messages: impl IntoIterator<Item = Message>) {
         self.session.restore(messages);

@@ -49,6 +49,46 @@ impl BlueprintFields {
     }
 }
 
+/// How a caption enters and holds the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextAnimation {
+    /// Plain cut-in; the default for ordinary lines.
+    None,
+    /// Scales up past its size and settles — reserved for emphasis.
+    Pop,
+    /// Words appear one at a time on their own timestamps.
+    Typewriter,
+    /// Rises into place from below.
+    SlideUp,
+    /// Held on screen with a slight shake.
+    Shake,
+}
+
+impl Default for TextAnimation {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+/// Caption look. Named roles rather than raw colours, so the theme decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextStyle {
+    /// Body captions.
+    Default,
+    /// Emphasised word or line.
+    Highlight,
+    /// Quiet aside, smaller.
+    Subtle,
+}
+
+impl Default for TextStyle {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
 /// Which stage a per-item failure came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

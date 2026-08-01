@@ -3,6 +3,7 @@ use crate::ui::components::timeline::headers::{header_width, track_header_sized,
 use crate::ui::components::timeline::markers::{
     playhead_marker, playhead_timecode, ripple_cut_marker, timeline_marker,
 };
+use crate::ai_tooling::orchestration::{TextAnimation, TextStyle};
 use crate::audio_engine::AudioSegment;
 use crate::media::{Poster, Segment, Textures, FILMSTRIP_FRAMES};
 use crate::models::MediaSelection;
@@ -152,9 +153,21 @@ pub struct TimelineMarker {
     pub color: String,
 }
 
+/// A caption placed on the timeline by the retention engine.
+#[derive(Clone, Debug)]
+pub struct TimelineText {
+    pub start: f32,
+    pub end: f32,
+    pub text: String,
+    pub animation: TextAnimation,
+    pub style: TextStyle,
+}
+
 pub struct TimelineState {
     pub tracks: Vec<Track>,
     pub markers: Vec<TimelineMarker>,
+    /// Captions, in timeline order.
+    pub texts: Vec<TimelineText>,
     /// Visible span. Follows the content instead of being a fixed canvas.
     pub seconds: f32,
     pub zoom: f32,
@@ -193,6 +206,7 @@ impl Default for TimelineState {
             playhead: 0.0,
             ripple_cuts: Vec::new(),
             markers: Vec::new(),
+            texts: Vec::new(),
             selected_track: 0,
         }
     }
@@ -315,6 +329,19 @@ impl TimelineState {
             };
             track.name = format!("{prefix}{n}");
         }
+    }
+
+    /// Adds a caption, keeping the list in timeline order.
+    pub fn add_text(&mut self, text: TimelineText) {
+        self.texts.push(text);
+        self.texts.sort_by(|a, b| a.start.total_cmp(&b.start));
+    }
+
+    /// First audio track that will take a clip, for dropped sound effects.
+    pub fn first_audio_track(&self) -> Option<usize> {
+        self.tracks
+            .iter()
+            .position(|track| track.kind == TrackKind::Audio && !track.locked)
     }
 
     /// One clip by id, wherever it sits.

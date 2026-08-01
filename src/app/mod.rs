@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub mod ai;
+pub mod credentials;
 pub mod library;
 pub mod menu_bar;
 pub mod modals;
@@ -89,6 +90,8 @@ pub struct AiDirectorApp {
     pub studio: views::studio::StudioState,
     pub growth: views::growth::GrowthState,
     pub ai: ai::AiBridge,
+    /// Credentials form — the only place API keys are entered.
+    pub settings: views::settings::SettingsState,
     /// When the open project first differed from what is on disk.
     dirty_since: Option<f32>,
 }
@@ -121,12 +124,30 @@ impl AiDirectorApp {
             studio: Default::default(),
             growth: Default::default(),
             ai,
+            settings: Default::default(),
             dirty_since: None,
         }
     }
 
     fn project(&self, id: ProjectId) -> Option<&Project> {
         self.library.find(id)
+    }
+
+    /// Reconnects the assistant with freshly saved keys. Reading them straight
+    /// from the form avoids mutating the process environment, which is unsound
+    /// once worker threads are running.
+    fn apply_credentials(&mut self) {
+        let credentials = self.settings.draft.clone();
+        self.studio.chat.reconnect(&credentials.to_config());
+
+        let director = if credentials.assistant_ready() {
+            ServiceState::Online
+        } else {
+            ServiceState::Error
+        };
+        if let Some(entry) = self.services.iter_mut().find(|(name, _)| *name == "LLM Director") {
+            entry.1 = director;
+        }
     }
 
     /// Writes the open project immediately, ignoring the autosave debounce.
@@ -218,14 +239,18 @@ impl eframe::App for AiDirectorApp {
 
         // 2. Route to the active view. Views mutate `route` to navigate.
         match self.route {
-            AppRoute::Dashboard => views::dashboard::show(
-                ctx,
-                &mut self.route,
-                &mut self.dashboard,
-                &self.library.projects,
-                self.library.error.as_deref(),
-                &mut self.modals,
-            ),
+            AppRoute::Dashboard => {
+                if views::dashboard::show(
+                    ctx,
+                    &mut self.route,
+                    &mut self.dashboard,
+                    &self.library.projects,
+                    self.library.error.as_deref(),
+                    &mut self.modals,
+                ) {
+                    self.settings.open();
+                }
+            }
             AppRoute::Onboarding => views::onboarding::show(
                 ctx,
                 &mut self.route,
@@ -260,6 +285,11 @@ impl eframe::App for AiDirectorApp {
         }
 
         // 3. Optional dev surface, then overlays on top of everything.
+        if views::settings::show(ctx, &mut self.settings)
+            == Some(views::settings::SettingsOutcome::Saved)
+        {
+            self.apply_credentials();
+        }
         views::gallery::window(ctx, &mut self.gallery_open, &mut self.gallery, self.time);
         modals::show(ctx, &mut self.modals, &mut self.route, dt);
 

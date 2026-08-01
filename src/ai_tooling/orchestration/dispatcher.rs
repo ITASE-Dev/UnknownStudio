@@ -7,6 +7,7 @@
 //!
 //! The host implements [`EditorState`]; nothing here knows about the UI types.
 
+use crate::ai_tooling::orchestration::models::{TextAnimation, TextStyle};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 use std::sync::mpsc::Sender;
@@ -52,6 +53,24 @@ pub enum ActionCommand {
     SetPlayhead {
         time_sec: f32,
     },
+    /// A caption spanning `[start_sec, end_sec)`.
+    AddText {
+        start_sec: f32,
+        end_sec: f32,
+        text: String,
+        #[serde(default)]
+        animation: TextAnimation,
+        #[serde(default)]
+        style: TextStyle,
+    },
+    /// A sound effect dropped at a point in time.
+    AddAudio {
+        start_sec: f32,
+        /// Pool asset name, or a built-in effect id.
+        file_id: String,
+        #[serde(default)]
+        volume_db: f32,
+    },
     PlaceAsset {
         asset: String,
         target_track_idx: usize,
@@ -83,6 +102,8 @@ impl ActionCommand {
             Self::TrimClip { .. } => "TRIM",
             Self::MoveClip { .. } => "MOVE",
             Self::SetPlayhead { .. } => "SET_PLAYHEAD",
+            Self::AddText { .. } => "ADD_TEXT",
+            Self::AddAudio { .. } => "ADD_AUDIO",
             Self::PlaceAsset { .. } => "PLACE",
             Self::RenderBroll { .. } => "RENDER_BROLL",
             Self::Export { .. } => "EXPORT",
@@ -145,6 +166,17 @@ pub trait EditorState {
     fn trim_clip(&mut self, clip_id: &str, start_sec: f32, end_sec: f32) -> Result<()>;
     fn move_clip(&mut self, clip_id: &str, track_idx: usize, time_sec: f32) -> Result<()>;
     fn set_playhead(&mut self, time_sec: f32);
+
+    fn add_text(
+        &mut self,
+        start_sec: f32,
+        end_sec: f32,
+        text: &str,
+        animation: TextAnimation,
+        style: TextStyle,
+    ) -> Result<()>;
+
+    fn add_audio(&mut self, start_sec: f32, file_id: &str, volume_db: f32) -> Result<()>;
     fn place_asset(&mut self, asset: &str, track_idx: usize, time_sec: f32) -> Result<()>;
 }
 
@@ -313,6 +345,48 @@ pub fn apply_action(action: &ActionCommand, state: &mut dyn EditorState) -> Resu
             Ok(Outcome::Applied)
         }
 
+        ActionCommand::AddText {
+            start_sec,
+            end_sec,
+            text,
+            animation,
+            style,
+        } => {
+            let start = finite_time(*start_sec)?;
+            let end = finite_time(*end_sec)?;
+
+            if text.trim().is_empty() {
+                return Err(DispatcherError::Rejected("caption text is empty".into()));
+            }
+            // A zero-length caption is on screen for no frames at all.
+            if end <= start {
+                return Err(DispatcherError::InvalidTime {
+                    value: end,
+                    reason: format!("caption must end after it starts ({start:.2}s)"),
+                });
+            }
+
+            state.add_text(start, end, text, *animation, *style)?;
+            Ok(Outcome::Applied)
+        }
+
+        ActionCommand::AddAudio {
+            start_sec,
+            file_id,
+            volume_db,
+        } => {
+            let start = finite_time(*start_sec)?;
+            if file_id.trim().is_empty() {
+                return Err(DispatcherError::Rejected("no sound effect named".into()));
+            }
+            if !volume_db.is_finite() {
+                return Err(DispatcherError::Rejected("volume is not a number".into()));
+            }
+
+            state.add_audio(start, file_id, *volume_db)?;
+            Ok(Outcome::Applied)
+        }
+
         ActionCommand::PlaceAsset {
             asset,
             target_track_idx,
@@ -451,6 +525,21 @@ mod tests {
         fn set_playhead(&mut self, time_sec: f32) {
             self.calls.push("set_playhead".into());
             self.playhead = time_sec;
+        }
+
+        fn add_text(
+            &mut self,
+            _start: f32,
+            _end: f32,
+            _text: &str,
+            _animation: TextAnimation,
+            _style: TextStyle,
+        ) -> Result<()> {
+            self.guard("add_text")
+        }
+
+        fn add_audio(&mut self, _start: f32, _file_id: &str, _volume_db: f32) -> Result<()> {
+            self.guard("add_audio")
         }
 
         fn place_asset(&mut self, _asset: &str, _track: usize, _at: f32) -> Result<()> {
@@ -690,6 +779,72 @@ mod tests {
             &mut editor,
         );
         assert_eq!(forwards, Ok(Outcome::Applied));
+    }
+
+    #[test]
+    fn a_caption_needs_text_and_a_span_to_live_in() {
+        let mut editor = FakeEditor::with_clip();
+
+        let good = apply_action(
+            &ActionCommand::AddText {
+                start_sec: 1.0,
+                end_sec: 2.5,
+                text: "hello there".into(),
+                animation: TextAnimation::Pop,
+                style: TextStyle::Highlight,
+            },
+            &mut editor,
+        );
+        assert_eq!(good, Ok(Outcome::Applied));
+
+        let empty = apply_action(
+            &ActionCommand::AddText {
+                start_sec: 1.0,
+                end_sec: 2.0,
+                text: "   ".into(),
+                animation: TextAnimation::None,
+                style: TextStyle::Default,
+            },
+            &mut editor,
+        );
+        assert!(matches!(empty, Err(DispatcherError::Rejected(_))));
+
+        let zero_length = apply_action(
+            &ActionCommand::AddText {
+                start_sec: 2.0,
+                end_sec: 2.0,
+                text: "flash".into(),
+                animation: TextAnimation::None,
+                style: TextStyle::Default,
+            },
+            &mut editor,
+        );
+        assert!(matches!(zero_length, Err(DispatcherError::InvalidTime { .. })));
+    }
+
+    #[test]
+    fn an_unnamed_sound_effect_is_refused() {
+        let mut editor = FakeEditor::with_clip();
+
+        let named = apply_action(
+            &ActionCommand::AddAudio {
+                start_sec: 3.0,
+                file_id: "whoosh".into(),
+                volume_db: -12.0,
+            },
+            &mut editor,
+        );
+        assert_eq!(named, Ok(Outcome::Applied));
+
+        let unnamed = apply_action(
+            &ActionCommand::AddAudio {
+                start_sec: 3.0,
+                file_id: String::new(),
+                volume_db: -12.0,
+            },
+            &mut editor,
+        );
+        assert!(matches!(unnamed, Err(DispatcherError::Rejected(_))));
     }
 
     #[test]

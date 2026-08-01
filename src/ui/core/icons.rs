@@ -36,6 +36,12 @@ pub const PROPERTIES: &str = ph::INFO;
 pub const DELETE: &str = ph::TRASH;
 pub const CANCEL: &str = ph::X_CIRCLE;
 
+// Settings.
+pub const SETTINGS: &str = ph::GEAR;
+pub const CREDENTIALS: &str = ph::KEY;
+pub const SHOW_SECRET: &str = ph::EYE;
+pub const HIDE_SECRET: &str = ph::EYE_SLASH;
+
 // Status.
 pub const BUSY: &str = ph::CIRCLE_NOTCH;
 pub const DONE: &str = ph::CHECK_CIRCLE;

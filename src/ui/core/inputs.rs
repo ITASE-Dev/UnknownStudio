@@ -30,6 +30,23 @@ pub fn pro_text_input_sized(ui: &mut Ui, value: &mut String, hint: &str, width: 
     resp
 }
 
+/// Field for a secret. Characters are replaced with dots unless `revealed`,
+/// so a key is never left on screen over someone's shoulder by default.
+pub fn secret_input(ui: &mut Ui, value: &mut String, hint: &str, revealed: bool) -> Response {
+    let width = fill_w(ui, 96.0, f32::INFINITY);
+    let resp = ui.add(
+        egui::TextEdit::singleline(value)
+            .password(!revealed)
+            .hint_text(RichText::new(hint).color(TEXT_DISABLED))
+            .text_color(TEXT_PRIMARY)
+            .desired_width(width)
+            .margin(Margin::symmetric(9.0, 6.0))
+            .frame(true),
+    );
+    focus_ring(ui, &resp);
+    resp
+}
+
 /// Multi-line field filling the row; one row shorter when compact.
 pub fn pro_text_area(ui: &mut Ui, value: &mut String, hint: &str, rows: usize) -> Response {
     let rows = if breakpoint(ui).is_compact() {
