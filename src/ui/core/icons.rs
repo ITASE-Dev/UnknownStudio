@@ -29,6 +29,13 @@ pub const MOVE_UP: &str = ph::ARROW_LINE_UP;
 pub const MOVE_DOWN: &str = ph::ARROW_LINE_DOWN;
 pub const REMOVE_TRACK: &str = ph::X;
 
+// Context menu.
+/// Hand the selection to the director.
+pub const SEND_TO_CHAT: &str = ph::CHAT_CIRCLE_TEXT;
+pub const PROPERTIES: &str = ph::INFO;
+pub const DELETE: &str = ph::TRASH;
+pub const CANCEL: &str = ph::X_CIRCLE;
+
 // Status.
 pub const BUSY: &str = ph::CIRCLE_NOTCH;
 pub const DONE: &str = ph::CHECK_CIRCLE;

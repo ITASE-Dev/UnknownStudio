@@ -1,5 +1,7 @@
 pub mod chat_panel;
+pub mod dispatch;
 pub mod dnd;
+pub mod ai_context;
 pub mod media_panel;
 pub mod persistence;
 pub mod tool_runner;
@@ -10,13 +12,17 @@ use crate::app::router::AppRoute;
 use crate::app::Project;
 use crate::audio_engine::{AudioEngine, WaveformService};
 use crate::media::{Decoded, PreviewEngine, Quality, Textures};
+use crate::ai_tooling::orchestration::{AsyncJob, PromptContext};
+use crate::models::MediaSelection;
 use crate::ui::components::inspector::preview_plate;
+use crate::ui::components::radial_menu::{RadialAction, RadialMenu};
 use crate::ui::components::timeline::tools::Tool;
 use crate::ui::core::buttons::{icon_button_painted, pro_button, Icon};
 use crate::ui::core::inputs::pro_slider;
 use crate::ui::theme::tokens::*;
 use eframe::egui::{self, Align, Layout, Margin, RichText, Stroke, Ui};
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -57,10 +63,18 @@ pub struct StudioState {
     pub tool_status: Option<String>,
     /// Factor the speed tool applies.
     pub speed_factor: f64,
+
+    /// Context menu opened by a secondary click.
+    pub radial: RadialMenu,
+
+    /// Heavy work the dispatcher defers. Drained by the studio each frame.
+    async_jobs: Sender<AsyncJob>,
+    async_inbox: Receiver<AsyncJob>,
 }
 
 impl Default for StudioState {
     fn default() -> Self {
+        let (async_jobs, async_inbox) = mpsc::channel();
         Self {
             chat: Default::default(),
             media: Default::default(),
@@ -80,6 +94,9 @@ impl Default for StudioState {
             tools: tool_runner::ToolRunner::new(),
             tool_status: None,
             speed_factor: 2.0,
+            radial: RadialMenu::default(),
+            async_jobs,
+            async_inbox,
         }
     }
 }
@@ -113,6 +130,8 @@ pub fn show(
 
     pump_media(ctx, state);
     pump_tools(state);
+    dispatch_model_actions(state);
+    inject_editor_state(state);
     let mut pending_tool: Option<Tool> = None;
 
     if chat_visible {
@@ -131,8 +150,12 @@ pub fn show(
             .width_range(220.0..=420.0)
             .frame(panel_frame())
             .show(ctx, |ui| {
-                if let Some(asset) = media_panel::show(ui, &mut state.media, &state.textures) {
+                let outcome = media_panel::show(ui, &mut state.media, &state.textures);
+                if let Some(asset) = outcome.drag {
                     state.drag = Some(asset);
+                }
+                if let Some((selection, pos)) = outcome.context_menu {
+                    state.radial.open_at(pos, selection);
                 }
             });
     }
@@ -156,6 +179,7 @@ pub fn show(
                 &state.textures,
                 &state.waveforms,
                 context,
+                &mut state.radial,
             )
         })
         .inner
@@ -167,6 +191,11 @@ pub fn show(
 
     if let Some(tool) = pending_tool {
         run_tool(state, tool);
+    }
+
+    // Drawn last so the menu floats above every panel.
+    if let Some(action) = state.radial.show(ctx) {
+        apply_radial_action(state, modals, action);
     }
 
     // The timeline consumes a valid drop; anything still in flight after every
@@ -236,6 +265,63 @@ fn pump_media(ctx: &egui::Context, state: &mut StudioState) {
                     .set(ctx, format!("{}#{index}", path.to_string_lossy()), &frame)
             }
         }
+    }
+}
+
+/// Applies whatever the model asked for this frame, then tells it what landed.
+fn dispatch_model_actions(state: &mut StudioState) {
+    let actions = state.chat.take_actions();
+    if actions.is_empty() {
+        return;
+    }
+
+    let report = dispatch::dispatch(
+        actions,
+        &mut state.timeline,
+        &state.media,
+        &state.async_jobs,
+    );
+    state.chat.report_dispatch(&report.feedback());
+}
+
+/// Keeps the assistant's system prompt in step with the timeline, the pool and
+/// whatever was last right-clicked.
+fn inject_editor_state(state: &mut StudioState) {
+    let timeline = ai_context::timeline_context(&state.timeline);
+    let pool = ai_context::pool_context(&state.media);
+    let selection = state.radial.target().map(ai_context::selection_context);
+
+    let context = PromptContext::new(&timeline, &pool).with_selection(selection.as_ref());
+    state.chat.inject_state(&context);
+}
+
+/// Routes a pie-menu choice. `Cancel` never reaches here — the menu closes on it.
+fn apply_radial_action(state: &mut StudioState, modals: &mut Modals, action: RadialAction) {
+    let Some(selection) = state.radial.take_target() else {
+        return;
+    };
+
+    match action {
+        RadialAction::SendToAiChat => {
+            state.chat.attach_selection(&selection);
+            // The conversation is in the left panel; make sure it is visible.
+            state.show_chat = true;
+        }
+        RadialAction::Split => {
+            if let Some(id) = selection.clip_id() {
+                state.timeline.select_only(id);
+                state.timeline.split_at_playhead();
+            }
+        }
+        RadialAction::Delete => {
+            if let Some(id) = selection.clip_id() {
+                state.timeline.remove_clip(id);
+            }
+        }
+        RadialAction::Properties => {
+            modals.info(&selection.title(), &selection.context_line());
+        }
+        RadialAction::Cancel => {}
     }
 }
 
@@ -527,19 +613,30 @@ fn preview(ui: &mut Ui, state: &mut StudioState, project: Option<&Project>) {
     let transport_h = 40.0;
     let avail_h = (ui.available_height() - transport_h).max(80.0);
     let image = state.textures.get(PROGRAM_TEXTURE);
+    let playhead = state.timeline.playhead;
+    let caption = format!(
+        "{} · {}",
+        project.map(|p| p.platform.as_str()).unwrap_or("YouTube 16:9"),
+        state.timeline.timecode()
+    );
+
+    let mut monitor_menu: Option<egui::Pos2> = None;
     ui.vertical_centered(|ui| {
         let width = ui.available_width().min(avail_h * 16.0 / 9.0);
-        preview_plate(
-            ui,
-            &format!(
-                "{} · {}",
-                project.map(|p| p.platform.as_str()).unwrap_or("YouTube 16:9"),
-                state.timeline.timecode()
-            ),
-            width,
-            image,
-        );
+        let plate = preview_plate(ui, &caption, width, image);
+        if let Some(pos) = plate
+            .secondary_clicked()
+            .then(|| plate.interact_pointer_pos())
+            .flatten()
+        {
+            monitor_menu = Some(pos);
+        }
     });
+    if let Some(pos) = monitor_menu {
+        state
+            .radial
+            .open_at(pos, MediaSelection::PreviewScreen { seconds: playhead });
+    }
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {

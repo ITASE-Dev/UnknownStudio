@@ -6,8 +6,9 @@ use crate::ui::core::buttons::{ai_button, pro_button, segmented};
 use crate::ui::core::inputs::search_input;
 use crate::ui::core::typography::{property_row, section_header};
 use crate::ui::theme::tokens::*;
+use crate::models::MediaSelection;
 use crate::views::studio::dnd::DragAsset;
-use eframe::egui::{RichText, ScrollArea, Ui};
+use eframe::egui::{self, RichText, ScrollArea, Ui};
 use std::path::PathBuf;
 
 pub struct Asset {
@@ -23,7 +24,7 @@ pub struct Asset {
 }
 
 impl Asset {
-    fn demo(name: &str, meta: &str, seconds: f32, kind: MediaKind, generated: bool) -> Self {
+    pub fn demo(name: &str, meta: &str, seconds: f32, kind: MediaKind, generated: bool) -> Self {
         Self {
             name: name.into(),
             meta: meta.into(),
@@ -58,7 +59,7 @@ impl Asset {
         }
     }
 
-    fn drag_payload(&self) -> DragAsset {
+    pub fn drag_payload(&self) -> DragAsset {
         DragAsset {
             name: self.name.clone(),
             path: self.path.clone(),
@@ -107,8 +108,16 @@ impl MediaState {
     }
 }
 
+/// What the pool asked the studio to do this frame.
+#[derive(Default)]
+pub struct PoolOutcome {
+    pub drag: Option<DragAsset>,
+    /// Right-clicked asset and where the pie menu should open.
+    pub context_menu: Option<(MediaSelection, egui::Pos2)>,
+}
+
 /// Returns a drag payload on the frame a card starts being dragged.
-pub fn show(ui: &mut Ui, state: &mut MediaState, textures: &Textures) -> Option<DragAsset> {
+pub fn show(ui: &mut Ui, state: &mut MediaState, textures: &Textures) -> PoolOutcome {
     section_header(ui, "Media pool");
 
     if pro_button(ui, "Import media…", true).clicked() {
@@ -181,12 +190,31 @@ pub fn show(ui: &mut Ui, state: &mut MediaState, textures: &Textures) -> Option<
         state.selected = idx;
     }
 
-    let drag = events
-        .drag_started
-        .and_then(|pos| indices.get(pos).copied())
-        .inspect(|&idx| state.selected = idx)
-        .and_then(|idx| state.assets.get(idx))
-        .map(Asset::drag_payload);
+    let mut outcome = PoolOutcome {
+        drag: events
+            .drag_started
+            .and_then(|pos| indices.get(pos).copied())
+            .inspect(|&idx| state.selected = idx)
+            .and_then(|idx| state.assets.get(idx))
+            .map(Asset::drag_payload),
+        context_menu: None,
+    };
+
+    if let Some((pos, screen_pos)) = events.context_menu {
+        if let Some(&idx) = indices.get(pos) {
+            state.selected = idx;
+            outcome.context_menu = state.assets.get(idx).map(|asset| {
+                (
+                    MediaSelection::PoolAsset {
+                        name: asset.name.clone(),
+                        path: asset.path.clone(),
+                        generated: asset.generated,
+                    },
+                    screen_pos,
+                )
+            });
+        }
+    }
 
     ui.add_space(8.0);
     ui.label(
@@ -200,7 +228,7 @@ pub fn show(ui: &mut Ui, state: &mut MediaState, textures: &Textures) -> Option<
         .id_source("media_inspector_scroll")
         .show(ui, |ui| inspector(ui, state, textures));
 
-    drag
+    outcome
 }
 
 fn inspector(ui: &mut Ui, state: &mut MediaState, textures: &Textures) {

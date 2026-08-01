@@ -151,6 +151,8 @@ pub struct PoolAsset<'a> {
 pub struct PoolEvents {
     pub clicked: Option<usize>,
     pub drag_started: Option<usize>,
+    /// Card index and screen position of a secondary click.
+    pub context_menu: Option<(usize, Pos2)>,
 }
 
 /// Media pool laid out as a grid that reflows column count on resize.
@@ -169,6 +171,13 @@ pub fn media_pool_grid(ui: &mut Ui, assets: &[PoolAsset<'_>]) -> PoolEvents {
         }
         if resp.drag_started() {
             events.drag_started = Some(i);
+        }
+        if let Some(pos) = resp
+            .secondary_clicked()
+            .then(|| resp.interact_pointer_pos())
+            .flatten()
+        {
+            events.context_menu = Some((i, pos));
         }
         if resp.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);

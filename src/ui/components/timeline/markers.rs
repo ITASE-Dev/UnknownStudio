@@ -115,3 +115,38 @@ pub fn range_marker(ui: &mut Ui, area: Rect, in_s: f32, out_s: f32, px_per_sec: 
         );
     }
 }
+
+/// Named marker: a coloured flag on the ruler with its label beside it.
+/// Unlike a ripple cut, this changes nothing about the cut — it is a note.
+pub fn timeline_marker(
+    ui: &mut Ui,
+    area: Rect,
+    seconds: f32,
+    px_per_sec: f32,
+    label: &str,
+    color: Color32,
+    index: usize,
+) -> Response {
+    let px = x_at(area, seconds, px_per_sec).round();
+    let hit = Rect::from_center_size(Pos2::new(px, area.center().y), Vec2::new(9.0, area.height()));
+    let resp = ui.interact(hit, ui.id().with(("marker", index)), Sense::click());
+
+    let p = ui.painter();
+    p.line_segment(
+        [Pos2::new(px, area.top()), Pos2::new(px, area.bottom())],
+        Stroke::new(1.0_f32, color.gamma_multiply(if resp.hovered() { 1.0 } else { 0.7 })),
+    );
+
+    // Pennant at the top, pointing right so it never covers its own line.
+    let flag = [
+        Pos2::new(px, area.top()),
+        Pos2::new(px + 11.0, area.top() + 4.0),
+        Pos2::new(px, area.top() + 8.0),
+    ];
+    p.add(egui::Shape::convex_polygon(flag.to_vec(), color, Stroke::NONE));
+
+    if resp.hovered() && !label.is_empty() {
+        return resp.on_hover_text(label);
+    }
+    resp
+}

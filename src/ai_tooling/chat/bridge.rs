@@ -4,7 +4,7 @@
 //! polls for the reply on later frames.
 
 use crate::ai_tooling::chat::models::Message;
-use crate::ai_tooling::chat::{ChatClient, ChatError, Result};
+use crate::ai_tooling::chat::{ChatClient, ChatError, ChatResponse, Result};
 use crate::ai_tooling::config::AiToolingConfig;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use tokio::runtime::Runtime;
@@ -13,7 +13,8 @@ use tokio::sync::mpsc as async_mpsc;
 /// What came back for a submitted turn.
 #[derive(Debug, Clone)]
 pub enum ChatEvent {
-    Reply(Message),
+    /// Prose, tool calls, or both — a tool call alone is a valid answer.
+    Reply(ChatResponse),
     /// Rendered failure text; the UI shows it as a notice, not a chat turn.
     Failed(String),
 }

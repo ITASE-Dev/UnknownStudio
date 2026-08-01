@@ -7,7 +7,7 @@ pub mod memory;
 pub mod models;
 
 pub use bridge::{ChatBridge, ChatEvent};
-pub use client::{ChatClient, CompletionOptions};
+pub use client::{ChatClient, ChatResponse, CompletionOptions};
 pub use memory::{ChatSession, ContextBudget};
 pub use models::{estimated_tokens, Message, Role};
 

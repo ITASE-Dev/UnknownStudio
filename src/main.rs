@@ -2,6 +2,7 @@ pub use unknown_studio::{action_engine, ai_tooling, audio_engine, workspace};
 
 mod app;
 mod media;
+mod models;
 mod ui;
 mod views;
 

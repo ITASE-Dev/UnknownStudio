@@ -1,20 +1,22 @@
 use crate::ui::components::timeline::clip::{clip_block, ClipKind, ClipVisuals, Filmstrip};
 use crate::ui::components::timeline::headers::{header_width, track_header_sized, TrackKind};
 use crate::ui::components::timeline::markers::{
-    playhead_marker, playhead_timecode, ripple_cut_marker,
+    playhead_marker, playhead_timecode, ripple_cut_marker, timeline_marker,
 };
 use crate::audio_engine::AudioSegment;
 use crate::media::{Poster, Segment, Textures, FILMSTRIP_FRAMES};
+use crate::models::MediaSelection;
 use crate::ui::components::timeline::{
     clip_rect, px_per_sec_for, ruler, ruler_scrub, seconds_at, track_lane,
 };
 use crate::ui::components::timeline::tools::{tool_status, tool_strip, Tool};
 use crate::ui::core::buttons::{icon_button, icon_button_painted, Icon};
+use crate::ui::components::radial_menu::RadialMenu;
 use crate::ui::core::icons;
 use crate::ui::core::inputs::pro_slider;
 use crate::ui::theme::tokens::*;
 use crate::views::studio::dnd::{self, DragAsset};
-use eframe::egui::{Align, Layout, Rect, RichText, ScrollArea, Ui, Vec2};
+use eframe::egui::{Align, Layout, Pos2, Rect, RichText, ScrollArea, Stroke, Ui, Vec2};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -99,12 +101,20 @@ pub struct Track {
 }
 
 impl Track {
-    fn accepts(&self, asset: &DragAsset) -> bool {
+    pub fn accepts(&self, asset: &DragAsset) -> bool {
         !self.locked
             && match self.kind {
                 TrackKind::Audio => asset.is_audio(),
                 TrackKind::Video => !asset.is_audio(),
             }
+    }
+
+    /// Whether this track carries that kind of clip at all.
+    fn accepts_kind(&self, kind: ClipKind) -> bool {
+        match self.kind {
+            TrackKind::Audio => kind == ClipKind::Audio,
+            TrackKind::Video => kind != ClipKind::Audio,
+        }
     }
 
     /// Where a clip dropped at `seconds` ends up on a gapless track: the index
@@ -133,8 +143,18 @@ impl Track {
 
 }
 
+/// A labelled point in time, placed by the user or by the assistant.
+#[derive(Clone, Debug)]
+pub struct TimelineMarker {
+    pub seconds: f32,
+    pub label: String,
+    /// Colour name or `#rrggbb`, as written by whoever placed it.
+    pub color: String,
+}
+
 pub struct TimelineState {
     pub tracks: Vec<Track>,
+    pub markers: Vec<TimelineMarker>,
     /// Visible span. Follows the content instead of being a fixed canvas.
     pub seconds: f32,
     pub zoom: f32,
@@ -172,6 +192,7 @@ impl Default for TimelineState {
             zoom: 1.0,
             playhead: 0.0,
             ripple_cuts: Vec::new(),
+            markers: Vec::new(),
             selected_track: 0,
         }
     }
@@ -294,6 +315,155 @@ impl TimelineState {
             };
             track.name = format!("{prefix}{n}");
         }
+    }
+
+    /// One clip by id, wherever it sits.
+    pub fn clip(&self, id: u64) -> Option<&Clip> {
+        self.tracks
+            .iter()
+            .flat_map(|track| track.clips.iter())
+            .find(|clip| clip.id == id)
+    }
+
+    /// Splits one clip at an absolute timeline second. The tail keeps showing
+    /// the same source frames, exactly as a playhead split does.
+    pub fn split_clip(&mut self, id: u64, seconds: f32) -> bool {
+        let Some(track_index) = self
+            .tracks
+            .iter()
+            .position(|track| track.clips.iter().any(|clip| clip.id == id))
+        else {
+            return false;
+        };
+        if self.tracks[track_index].locked {
+            return false;
+        }
+
+        let track = &mut self.tracks[track_index];
+        let Some(index) = track.clips.iter().position(|clip| clip.id == id) else {
+            return false;
+        };
+        let clip = &track.clips[index];
+        if seconds <= clip.start + 0.01 || seconds >= clip.start + clip.len - 0.01 {
+            return false;
+        }
+
+        let head_len = seconds - clip.start;
+        let tail = Clip {
+            id: next_clip_id(),
+            label: clip.label.clone(),
+            kind: clip.kind,
+            start: seconds,
+            len: clip.len - head_len,
+            selected: false,
+            path: clip.path.clone(),
+            trim_in: clip.trim_in + head_len,
+            has_audio: clip.has_audio,
+            source_seconds: clip.source_seconds,
+        };
+        track.clips[index].len = head_len;
+        track.clips.insert(index + 1, tail);
+        true
+    }
+
+    /// Keeps only `[start, end)` of a clip's source. The track re-packs, so
+    /// what follows closes up behind the shortened clip.
+    pub fn trim_clip(&mut self, id: u64, start_sec: f32, end_sec: f32) -> bool {
+        let Some(track_index) = self
+            .tracks
+            .iter()
+            .position(|track| track.clips.iter().any(|clip| clip.id == id))
+        else {
+            return false;
+        };
+        if self.tracks[track_index].locked {
+            return false;
+        }
+
+        let track = &mut self.tracks[track_index];
+        let Some(clip) = track.clips.iter_mut().find(|clip| clip.id == id) else {
+            return false;
+        };
+
+        // The window has to land inside the source, and leave something behind.
+        let limit = clip.source_seconds.max(clip.trim_in + clip.len);
+        let start = start_sec.clamp(0.0, limit);
+        let end = end_sec.clamp(0.0, limit);
+        if end - start < 0.05 {
+            return false;
+        }
+
+        clip.trim_in = start;
+        clip.len = end - start;
+        track.repack();
+        self.fit_span();
+        true
+    }
+
+    /// Makes `id` the only selected clip — the pie menu acts on what was
+    /// right-clicked, not on whatever happened to be selected before.
+    pub fn select_only(&mut self, id: u64) {
+        for clip in self.tracks.iter_mut().flat_map(|t| t.clips.iter_mut()) {
+            clip.selected = clip.id == id;
+        }
+    }
+
+    /// Moves a clip to another track at `seconds`, if that track accepts it.
+    /// Both tracks re-pack, so neither is left with a hole.
+    pub fn move_clip_to_track(&mut self, clip_id: u64, target_track: usize, seconds: f32) -> bool {
+        let Some(source_track) = self
+            .tracks
+            .iter()
+            .position(|track| track.clips.iter().any(|clip| clip.id == clip_id))
+        else {
+            return false;
+        };
+        if source_track == target_track {
+            return false;
+        }
+
+        let (Some(source), Some(target)) = (
+            self.tracks.get(source_track),
+            self.tracks.get(target_track),
+        ) else {
+            return false;
+        };
+        let Some(clip) = source.clips.iter().find(|clip| clip.id == clip_id) else {
+            return false;
+        };
+        // Audio belongs on audio lanes and picture on video lanes; a locked
+        // track refuses everything.
+        if target.locked || source.locked || !target.accepts_kind(clip.kind) {
+            return false;
+        }
+
+        let (index, start) = target.insert_position(seconds);
+        let mut moved = self.tracks[source_track]
+            .clips
+            .iter()
+            .position(|clip| clip.id == clip_id)
+            .map(|position| self.tracks[source_track].clips.remove(position))
+            .expect("clip located above");
+        moved.start = start;
+
+        self.tracks[source_track].repack();
+        self.tracks[target_track].clips.insert(index, moved);
+        self.tracks[target_track].repack();
+        self.fit_span();
+        true
+    }
+
+    /// Removes one clip and closes the gap it leaves.
+    pub fn remove_clip(&mut self, id: u64) {
+        for track in self.tracks.iter_mut().filter(|t| !t.locked) {
+            let before = track.clips.len();
+            track.clips.retain(|clip| clip.id != id);
+            if track.clips.len() != before {
+                track.repack();
+                break;
+            }
+        }
+        self.fit_span();
     }
 
     /// Deletes the selection and closes the holes it leaves.
@@ -448,6 +618,34 @@ impl TimelineState {
     }
 }
 
+/// Colour a marker was labelled with: a name the model might use, or `#rrggbb`.
+/// Anything unrecognised falls back to the accent, never to an error.
+fn marker_color(name: &str) -> eframe::egui::Color32 {
+    use eframe::egui::Color32;
+
+    let trimmed = name.trim();
+    if let Some(hex) = trimmed.strip_prefix('#') {
+        if hex.len() == 6 {
+            if let Ok(value) = u32::from_str_radix(hex, 16) {
+                return Color32::from_rgb(
+                    (value >> 16) as u8,
+                    ((value >> 8) & 0xff) as u8,
+                    (value & 0xff) as u8,
+                );
+            }
+        }
+    }
+
+    match trimmed.to_ascii_lowercase().as_str() {
+        "red" => ERR,
+        "green" => OK,
+        "yellow" | "amber" => WARN,
+        "purple" | "violet" => AI,
+        "blue" => ACCENT,
+        _ => ACCENT,
+    }
+}
+
 /// Parts of `[start, end)` not already claimed by an earlier segment.
 fn uncovered(program: &[Segment], start: f32, end: f32) -> Vec<(f32, f32)> {
     let mut gaps = vec![(start, end)];
@@ -487,6 +685,7 @@ pub fn show(
     textures: &Textures,
     waveforms: &HashMap<String, Arc<Vec<f32>>>,
     tools: ToolContext<'_>,
+    menu: &mut RadialMenu,
 ) -> Option<Tool> {
     let pressed_tool = toolbar(ui, state, &tools);
     ui.add_space(6.0);
@@ -498,6 +697,8 @@ pub fn show(
     let mut drop_into: Option<(usize, f32)> = None;
     let mut repack: Option<usize> = None;
     let mut select_track: Option<usize> = None;
+    // Clip dragged onto a different lane: (clip id, target track, seconds).
+    let mut move_to_track: Option<(u64, usize, f32)> = None;
 
     let head_w = header_width(ui);
     ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -532,6 +733,8 @@ pub fn show(
                     }
 
                     let mut lanes: Vec<Rect> = Vec::with_capacity(state.tracks.len());
+                    let mut dragging: Option<(u64, usize)> = None;
+                    let mut dropped: Option<(u64, usize, Pos2, f32)> = None;
                     for (ti, t) in state.tracks.iter_mut().enumerate() {
                         let (lane, _) = track_lane(ui, state.seconds, px);
                         lanes.push(lane);
@@ -552,6 +755,7 @@ pub fn show(
                         }
 
                         let dim = t.muted || t.locked;
+                        let track_name = t.name.clone();
                         for c in t.clips.iter_mut() {
                             let rect = clip_rect(lane, c.start, c.len, px);
                             let key = c.path.as_ref().map(|p| p.to_string_lossy().into_owned());
@@ -575,12 +779,35 @@ pub fn show(
                             if resp.clicked() {
                                 c.selected = !c.selected;
                             }
+                            // Secondary click opens the pie menu at the cursor.
+                            if let Some(pos) = resp
+                                .secondary_clicked()
+                                .then(|| resp.interact_pointer_pos())
+                                .flatten()
+                            {
+                                menu.open_at(
+                                    pos,
+                                    MediaSelection::Clip {
+                                        id: c.id,
+                                        label: c.label.clone(),
+                                        track: track_name.clone(),
+                                        start_seconds: c.start,
+                                        duration_seconds: c.len,
+                                    },
+                                );
+                            }
                             if resp.dragged() && !t.locked {
                                 c.start = (c.start + resp.drag_delta().x / px).max(0.0);
+                                dragging = Some((c.id, ti));
                             }
                             // Reordering by dragging: the track re-packs once the
                             // clip is dropped, so no hole is ever left behind.
                             if resp.drag_stopped() && !t.locked {
+                                // The pointer decides the lane; the lane pass
+                                // below turns its y into a track index.
+                                dropped = resp
+                                    .interact_pointer_pos()
+                                    .map(|pos| (c.id, ti, pos, c.start));
                                 repack = Some(ti);
                             }
                             if dim {
@@ -593,12 +820,53 @@ pub fn show(
                         }
                     }
 
+                    // A clip released over a different lane changes track.
+                    if let Some((clip_id, source, pos, start)) = dropped {
+                        if let Some(target) = lanes.iter().position(|lane| lane.contains(pos)) {
+                            if target != source {
+                                move_to_track = Some((clip_id, target, start));
+                            }
+                        }
+                    }
+
+                    // While dragging vertically, outline the lane it would land on.
+                    if let (Some((_, source)), Some(pos)) = (dragging, pointer) {
+                        if let Some(target) = lanes.iter().position(|lane| lane.contains(pos)) {
+                            if target != source {
+                                ui.painter().rect_stroke(
+                                    lanes[target],
+                                    R_SM,
+                                    Stroke::new(1.5_f32, ACCENT),
+                                );
+                            }
+                        }
+                    }
+
                     if let (Some(first), Some(last)) = (lanes.first(), lanes.last()) {
                         let area = Rect::from_min_max(first.left_top(), last.right_bottom());
                         for (i, cut) in state.ripple_cuts.clone().iter().enumerate() {
                             if ripple_cut_marker(ui, area, *cut, px, i).clicked() {
                                 state.ripple_cuts.retain(|c| c != cut);
                             }
+                        }
+                        // Named markers: clicking one parks the playhead on it.
+                        let mut jump_to: Option<f32> = None;
+                        for (i, marker) in state.markers.iter().enumerate() {
+                            let response = timeline_marker(
+                                ui,
+                                area,
+                                marker.seconds,
+                                px,
+                                &marker.label,
+                                marker_color(&marker.color),
+                                i,
+                            );
+                            if response.clicked() {
+                                jump_to = Some(marker.seconds);
+                            }
+                        }
+                        if let Some(seconds) = jump_to {
+                            state.playhead = seconds;
                         }
                         playhead_marker(ui, area, &mut state.playhead, px);
                         playhead_timecode(ui, area, state.playhead, px);
@@ -612,8 +880,17 @@ pub fn show(
             state.place(track_idx, &asset, start);
         }
     }
-    if let Some(track_idx) = repack {
-        state.repack_track(track_idx);
+    // The vertical move re-packs both lanes itself, so it wins over the
+    // same-track repack the drag would otherwise trigger.
+    match move_to_track {
+        Some((clip_id, target, seconds)) => {
+            state.move_clip_to_track(clip_id, target, seconds);
+        }
+        None => {
+            if let Some(track_idx) = repack {
+                state.repack_track(track_idx);
+            }
+        }
     }
     if let Some(track_idx) = select_track {
         state.selected_track = track_idx;
@@ -857,6 +1134,49 @@ mod tests {
         state.tracks[0].clips[0].selected = true;
         state.delete_selected();
         assert_eq!(state.seconds, empty);
+    }
+
+    #[test]
+    fn a_clip_can_be_dragged_to_another_video_track() {
+        let mut state = TimelineState::default();
+        state.add_track(TrackKind::Video);
+        state.place(0, &asset("a", 4.0), 0.0);
+        state.place(0, &asset("b", 3.0), 10.0);
+
+        let moved = state.tracks[0].clips[1].id;
+        assert!(state.move_clip_to_track(moved, 1, 0.0));
+
+        assert_eq!(state.tracks[0].clips.len(), 1);
+        assert_eq!(state.tracks[1].clips.len(), 1);
+        // Both lanes stay gapless afterwards.
+        assert_eq!(state.tracks[0].clips[0].start, 0.0);
+        assert_eq!(state.tracks[1].clips[0].start, 0.0);
+    }
+
+    #[test]
+    fn a_video_clip_is_refused_by_an_audio_track() {
+        let mut state = TimelineState::default();
+        state.place(0, &asset("a", 4.0), 0.0);
+        let clip = state.tracks[0].clips[0].id;
+
+        // Track 1 is the default A1 lane.
+        assert!(!state.move_clip_to_track(clip, 1, 0.0));
+        assert_eq!(state.tracks[0].clips.len(), 1);
+    }
+
+    #[test]
+    fn a_locked_track_neither_gives_up_nor_accepts_clips() {
+        let mut state = TimelineState::default();
+        state.add_track(TrackKind::Video);
+        state.place(0, &asset("a", 4.0), 0.0);
+        let clip = state.tracks[0].clips[0].id;
+
+        state.tracks[1].locked = true;
+        assert!(!state.move_clip_to_track(clip, 1, 0.0), "target is locked");
+
+        state.tracks[1].locked = false;
+        state.tracks[0].locked = true;
+        assert!(!state.move_clip_to_track(clip, 1, 0.0), "source is locked");
     }
 
     #[test]
