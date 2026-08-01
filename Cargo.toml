@@ -25,6 +25,16 @@ egui-phosphor = "0.5"
 directories = "5"
 thiserror = "2.0.19"
 dotenvy = "0.15.7"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3.33"
+
+# visual_analysis — needs a system OpenCV build, so it is opt-in:
+#   cargo build --features visual-analysis
+opencv = { version = "0.93", optional = true, default-features = false, features = ["videoio", "imgproc"] }
+
+[features]
+default = []
+visual-analysis = ["dep:opencv"]
 
 # Decode/analysis hot loops are unusably slow in an unoptimized debug build.
 [profile.dev]

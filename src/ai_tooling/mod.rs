@@ -6,19 +6,23 @@
 //!   editing rulebook that produced it.
 
 pub mod chat;
+pub mod comfyui;
 pub mod config;
 pub mod ingestion;
 pub mod orchestration;
 pub mod prompting;
 pub mod providers;
 pub mod scraping;
+pub mod visual_analysis;
 
 pub use chat::{ChatBridge, ChatClient, ChatError, ChatEvent, ChatSession, ContextBudget, Message, Role};
+pub use comfyui::{ComfyEvent, ComfyUiClient, ComfyUiError, JobProgress, ProgressListener};
 pub use config::{AiToolingConfig, ProviderKind};
 pub use ingestion::{ChannelIngest, VideoRecord, YouTubeClient};
 pub use orchestration::{Blueprint, BlueprintEngine, PipelineReport, StageFailure};
 pub use providers::LlmClient;
 pub use scraping::{DeepScraper, PeakAnalysis};
+pub use visual_analysis::{analyze_motion, MotionSpike, VisualTimeline};
 
 use thiserror::Error;
 
@@ -58,6 +62,9 @@ pub enum AiToolingError {
 
     #[error("blueprint {video_id}: {reason}")]
     Blueprint { video_id: String, reason: String },
+
+    #[error("visual analysis: {0}")]
+    Vision(String),
 }
 
 pub type Result<T> = std::result::Result<T, AiToolingError>;
