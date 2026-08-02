@@ -101,17 +101,15 @@ fn file_menu(ui: &mut egui::Ui, m: &mut MenuBarCtx<'_>) {
                 .info("Saved", "Project state written to the local library.");
             ui.close_menu();
         }
+        // Sends the user to the export form rather than faking a render.
+        // The button that actually queues the job lives there, next to the
+        // codec and container it will use.
         if item(ui, "Render & Export…") {
-            let next = m
+            *m.route = m
                 .route
                 .project()
                 .map(AppRoute::Growth)
                 .unwrap_or(AppRoute::Dashboard);
-            m.modals.progress(
-                "Rendering",
-                "Encoding the timeline to H.264 · 1080p.",
-                ModalAction::Navigate(next),
-            );
             ui.close_menu();
         }
         ui.separator();
@@ -169,6 +167,10 @@ fn view_menu(ui: &mut egui::Ui, m: &mut MenuBarCtx<'_>, has_project: bool) {
         ui.set_min_width(190.0);
         if item(ui, "Projects") {
             *m.route = AppRoute::Dashboard;
+            ui.close_menu();
+        }
+        if item(ui, "Channel Research") {
+            *m.route = AppRoute::Insights;
             ui.close_menu();
         }
         ui.add_enabled_ui(has_project, |ui| {

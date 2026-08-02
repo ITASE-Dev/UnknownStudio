@@ -362,6 +362,36 @@ mod tests {
         assert_eq!(timeline.tracks[0].clips[1].start, 4.0);
     }
 
+    /// The deferred queue used to have no reader at all: this asserted that
+    /// the job reached the channel, and nothing asserted anyone took it out.
+    #[test]
+    fn deferred_work_is_readable_by_the_studio_that_forwards_it() {
+        let (mut timeline, id) = timeline_with_clip();
+        let pool = MediaState::default();
+        let (tx, rx) = mpsc::channel();
+
+        dispatch(
+            vec![
+                ActionCommand::RenderBroll {
+                    clip_id: format!("c{id}"),
+                    prompt: "an overhead desk shot".into(),
+                },
+                ActionCommand::Export { preset: "h264_mp4".into() },
+            ],
+            &mut timeline,
+            &pool,
+            &tx,
+        );
+
+        // Exactly what `StudioState::take_async_jobs` does.
+        let queued: Vec<AsyncJob> = rx.try_iter().collect();
+        assert_eq!(queued.len(), 2, "both were deferred, neither was lost");
+        assert!(queued
+            .iter()
+            .any(|j| matches!(j, AsyncJob::RenderBroll { prompt, .. } if prompt.contains("desk"))));
+        assert!(queued.iter().any(|j| matches!(j, AsyncJob::Export { .. })));
+    }
+
     #[test]
     fn heavy_work_leaves_the_timeline_alone_and_reaches_the_worker() {
         let (mut timeline, id) = timeline_with_clip();

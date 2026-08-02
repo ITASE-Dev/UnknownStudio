@@ -1,5 +1,6 @@
 //! Anthropic Messages API with structured outputs.
 
+use crate::ai_tooling::pipeline::schema::SchemaSpec;
 use crate::ai_tooling::providers::{Completion, MAX_TOKENS};
 use crate::ai_tooling::{AiToolingError, Result};
 use reqwest::Client;
@@ -28,12 +29,23 @@ impl AnthropicClient {
         &self.model
     }
 
+    pub async fn complete_with(
+        &self,
+        system_prompt: &str,
+        payload: &Value,
+        spec: &SchemaSpec,
+    ) -> Result<Completion> {
+        self.complete(system_prompt, payload, &spec.schema).await
+    }
+
     pub async fn complete(
         &self,
         system_prompt: &str,
         payload: &Value,
         schema: &Value,
     ) -> Result<Completion> {
+        // Anthropic takes the schema unnamed, so the spec's name is only used
+        // for our own error messages.
         let body = json!({
             "model": self.model,
             "max_tokens": MAX_TOKENS,

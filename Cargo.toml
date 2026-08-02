@@ -13,7 +13,10 @@ ffmpeg-next = "8.1"
 reqwest = { version = "0.12", features = ["blocking", "json", "multipart"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "rt-multi-thread"] }
+# JSON Schema generated from the Rust types the model must return, so the
+# schema and the struct cannot drift apart.
+schemars = "0.8"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "rt-multi-thread", "sync", "time"] }
 uuid = { version = "1.8", features = ["v4"] }
 
 # media ingest

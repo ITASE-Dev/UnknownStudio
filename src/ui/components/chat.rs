@@ -56,6 +56,55 @@ pub fn bubble_width(ui: &Ui) -> f32 {
     (avail * if breakpoint(ui).is_compact() { 0.96 } else { 0.82 }).clamp(120.0, 620.0).min(avail)
 }
 
+/// Narrowest a bubble may be before it stops being readable.
+const MIN_BUBBLE_W: f32 = 80.0;
+
+/// Places one bubble in its own row, at a width it can rely on.
+///
+/// Alignment is an **offset**, not a layout direction. Right-aligning with
+/// `Layout::right_to_left` looks equivalent and is not: the frame's content
+/// inherits that direction, and a wrapping label inside a right-to-left `Ui`
+/// measures its wrap width from the opposite edge. Short messages hugged the
+/// right correctly while long ones resolved to nearly the full panel width, so
+/// the column appeared to jump sideways depending on message length.
+///
+/// Here the row is a plain left-to-right `horizontal` and the layout stays
+/// top-down, so text always wraps against `width` — the same measurement for
+/// every message, long or short.
+///
+/// Two things do the aligning, and both are needed:
+///
+/// - the leading `add_space` puts the *region* against the right edge, and
+/// - `Align::Max` puts the *bubble* against the right edge of that region.
+///
+/// Without the second, a short message hugs the left of a full-measure region
+/// and lands in the middle of the panel while a long one reaches the edge —
+/// which is the jump this function exists to prevent.
+fn bubble_row(
+    ui: &mut Ui,
+    align_right: bool,
+    max_width: f32,
+    add: impl FnOnce(&mut Ui) -> Response,
+) -> Response {
+    let available = ui.available_width().max(MIN_BUBBLE_W);
+    let width = max_width.clamp(MIN_BUBBLE_W, available);
+    let cross = if align_right { Align::Max } else { Align::Min };
+
+    ui.horizontal(|ui| {
+        if align_right {
+            ui.add_space((available - width).max(0.0));
+        }
+        ui.allocate_ui_with_layout(Vec2::new(width, 0.0), Layout::top_down(cross), |ui| {
+            // The frame subtracts its own margins from this, so the label
+            // wraps at exactly the bubble's inner width.
+            ui.set_max_width(width);
+            add(ui)
+        })
+        .inner
+    })
+    .inner
+}
+
 /// Left-aligned assistant bubble: elevated plate, accent hairline, squared top-left.
 pub fn ai_chat_bubble(ui: &mut Ui, author: &str, body: &str) -> Response {
     let w = bubble_width(ui);
@@ -63,25 +112,19 @@ pub fn ai_chat_bubble(ui: &mut Ui, author: &str, body: &str) -> Response {
 }
 
 pub fn ai_chat_bubble_sized(ui: &mut Ui, author: &str, body: &str, max_width: f32) -> Response {
-    let max_width = max_width.min(ui.available_width()).max(80.0);
-    ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
-        ui.set_max_width(max_width);
+    bubble_row(ui, false, max_width, |ui| {
         egui::Frame::none()
             .fill(BG_ELEVATED)
             .stroke(Stroke::new(1.0_f32, ACCENT.linear_multiply(0.35)))
             .rounding(Rounding { nw: 2.0, ne: 6.0, sw: 6.0, se: 6.0 })
             .inner_margin(Margin::symmetric(12.0, 10.0))
             .show(ui, |ui| {
-                ui.set_max_width(max_width - 24.0);
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(author).small().strong().color(ACCENT));
-                    ui.add_space(2.0);
-                    ui.label(RichText::new(body).color(TEXT_PRIMARY));
-                });
+                ui.label(RichText::new(author).small().strong().color(ACCENT));
+                ui.add_space(2.0);
+                ui.label(RichText::new(body).color(TEXT_PRIMARY));
             })
             .response
     })
-    .inner
 }
 
 /// Right-aligned user bubble: sunken plate, squared top-right.
@@ -91,20 +134,17 @@ pub fn user_chat_bubble(ui: &mut Ui, body: &str) -> Response {
 }
 
 pub fn user_chat_bubble_sized(ui: &mut Ui, body: &str, max_width: f32) -> Response {
-    let max_width = max_width.min(ui.available_width()).max(80.0);
-    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+    bubble_row(ui, true, max_width, |ui| {
         egui::Frame::none()
             .fill(BG_SUNKEN)
             .stroke(hairline())
             .rounding(Rounding { nw: 6.0, ne: 2.0, sw: 6.0, se: 6.0 })
             .inner_margin(Margin::symmetric(12.0, 10.0))
             .show(ui, |ui| {
-                ui.set_max_width(max_width - 24.0);
                 ui.label(RichText::new(body).color(TEXT_SECONDARY));
             })
             .response
     })
-    .inner
 }
 
 /// Full-width notice plate for failures and system messages.
@@ -195,4 +235,166 @@ pub fn chat_column<R>(ui: &mut Ui, composer_h: f32, transcript: impl FnOnce(&mut
         .max_height(h)
         .stick_to_bottom(true)
         .show(ui, transcript);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::egui::{Context, Rect, RawInput};
+
+    const PANEL_W: f32 = 600.0;
+
+    /// Lays the closure out in a real context and returns what it produced.
+    ///
+    /// Two frames: egui settles galley sizes on the second, and a bubble's
+    /// width depends on its wrapped text.
+    fn lay_out<R: Clone>(add: impl Fn(&mut Ui) -> R) -> (R, Rect) {
+        let ctx = Context::default();
+        let input = || RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(PANEL_W, 800.0),
+            )),
+            ..Default::default()
+        };
+
+        let mut captured: Option<R> = None;
+        let mut panel = Rect::NOTHING;
+        for _ in 0..2 {
+            captured = None;
+            ctx.run(input(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    panel = ui.max_rect();
+                    captured = Some(add(ui));
+                });
+            });
+        }
+        (captured.expect("laid out"), panel)
+    }
+
+    const SHORT: &str = "cut it";
+    const LONG: &str = "Tighten the opening to twenty seconds, drop the second B-roll, \
+        and put a whoosh on every hard cut in the first minute so the pacing matches \
+        the reference video we looked at earlier this afternoon.";
+
+    #[test]
+    fn a_user_bubble_is_right_aligned_whatever_its_length() {
+        let (short, panel) = lay_out(|ui| user_chat_bubble(ui, SHORT));
+        let (long, _) = lay_out(|ui| user_chat_bubble(ui, LONG));
+
+        // Both end at the same place: that edge is what the eye tracks, and
+        // it is what used to move.
+        assert!(
+            (short.rect.right() - long.rect.right()).abs() < 1.0,
+            "right edges disagree: short {} vs long {}",
+            short.rect.right(),
+            long.rect.right()
+        );
+        assert!(
+            short.rect.right() <= panel.right() + 1.0,
+            "bubble overflowed the panel"
+        );
+    }
+
+    #[test]
+    fn a_short_user_bubble_does_not_span_the_whole_panel() {
+        let (short, panel) = lay_out(|ui| user_chat_bubble(ui, SHORT));
+
+        // The regression looked like this: a bubble ballooning to full width
+        // and dragging its text across the panel.
+        assert!(
+            short.rect.width() < panel.width() * 0.6,
+            "a two-word message took {:.0}px of {:.0}px",
+            short.rect.width(),
+            panel.width()
+        );
+        assert!(short.rect.left() > panel.left(), "it should be inset from the left");
+    }
+
+    #[test]
+    fn an_assistant_bubble_is_left_aligned_whatever_its_length() {
+        let (short, panel) = lay_out(|ui| AiChatBubble::show(ui, SHORT));
+        let (long, _) = lay_out(|ui| AiChatBubble::show(ui, LONG));
+
+        assert!(
+            (short.rect.left() - long.rect.left()).abs() < 1.0,
+            "left edges disagree: short {} vs long {}",
+            short.rect.left(),
+            long.rect.left()
+        );
+        assert!((short.rect.left() - panel.left()).abs() < 1.0, "flush left");
+    }
+
+    #[test]
+    fn the_two_sides_do_not_meet_in_the_middle() {
+        let (user, _) = lay_out(|ui| user_chat_bubble(ui, SHORT));
+        let (ai, _) = lay_out(|ui| AiChatBubble::show(ui, SHORT));
+
+        assert!(
+            ai.rect.left() < user.rect.left(),
+            "the assistant must sit left of the user"
+        );
+    }
+
+    #[test]
+    fn a_long_message_wraps_instead_of_running_off_the_edge() {
+        let (long, panel) = lay_out(|ui| user_chat_bubble(ui, LONG));
+
+        assert!(
+            long.rect.width() <= panel.width() + 1.0,
+            "bubble is {:.0}px wide in a {:.0}px panel",
+            long.rect.width(),
+            panel.width()
+        );
+        // Wrapping means height, not width: a single unwrapped line would be
+        // one row tall.
+        assert!(long.rect.height() > 40.0, "it did not wrap");
+    }
+
+    #[test]
+    fn a_narrow_panel_still_produces_a_usable_bubble() {
+        let ctx = Context::default();
+        let mut rect = Rect::NOTHING;
+        for _ in 0..2 {
+            ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(140.0, 400.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        rect = user_chat_bubble(ui, LONG).rect;
+                    });
+                },
+            );
+        }
+
+        assert!(rect.width() >= MIN_BUBBLE_W - 1.0, "collapsed to {}", rect.width());
+        assert!(rect.width() <= 140.0 + 1.0, "overflowed a narrow panel");
+    }
+
+    #[test]
+    fn the_measure_is_capped_so_a_wide_window_does_not_produce_one_long_line() {
+        let ctx = Context::default();
+        let mut width = 0.0;
+        ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(2400.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    width = bubble_width(ui);
+                });
+            },
+        );
+
+        assert!(width <= 620.0, "{width} exceeds the readable measure");
+    }
 }

@@ -5,6 +5,7 @@
 pub mod dashboard;
 pub mod gallery;
 pub mod growth;
+pub mod insights;
 pub mod onboarding;
 pub mod settings;
 pub mod studio;

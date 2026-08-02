@@ -112,9 +112,14 @@ fn header(ui: &mut Ui, route: &mut AppRoute, state: &mut DashboardState) -> bool
             open_settings |= settings_button(ui);
         });
         ui.add_space(6.0);
-        if pro_button(ui, "New Project", true).clicked() {
-            *route = AppRoute::Onboarding;
-        }
+        ui.horizontal(|ui| {
+            if pro_button(ui, "New Project", true).clicked() {
+                *route = AppRoute::Onboarding;
+            }
+            if research_button(ui) {
+                *route = AppRoute::Insights;
+            }
+        });
         return open_settings;
     }
 
@@ -123,6 +128,9 @@ fn header(ui: &mut Ui, route: &mut AppRoute, state: &mut DashboardState) -> bool
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if pro_button(ui, "New Project", true).clicked() {
                 *route = AppRoute::Onboarding;
+            }
+            if research_button(ui) {
+                *route = AppRoute::Insights;
             }
             open_settings |= settings_button(ui);
             search_input(ui, &mut state.search, "Search projects…");
@@ -137,6 +145,13 @@ fn header(ui: &mut Ui, route: &mut AppRoute, state: &mut DashboardState) -> bool
 fn settings_button(ui: &mut Ui) -> bool {
     icon_button(ui, icons::SETTINGS, true, false)
         .on_hover_text("Settings · API keys")
+        .clicked()
+}
+
+/// Opens channel research, which stands apart from any single project.
+fn research_button(ui: &mut Ui) -> bool {
+    pro_button(ui, "Examine Channel", false)
+        .on_hover_text("Find a channel's outlier uploads and measure their pacing")
         .clicked()
 }
 

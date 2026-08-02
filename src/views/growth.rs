@@ -21,6 +21,10 @@ pub struct GrowthState {
     pub codec: usize,
     pub container: usize,
     pub burn_captions: bool,
+    /// Set when the user asks for a render; taken by `show`.
+    pub export_requested: Option<String>,
+    /// Progress or failure from the encoder job.
+    pub export_status: Option<String>,
 }
 
 impl Default for GrowthState {
@@ -33,6 +37,8 @@ impl Default for GrowthState {
             codec: 0,
             container: 0,
             burn_captions: true,
+            export_requested: None,
+            export_status: None,
         }
     }
 }
@@ -49,14 +55,30 @@ const HEAT: [f32; 24] = [
     0.86, 0.94, 1.0, 0.92, 0.81, 0.66, 0.48, 0.31, 0.19,
 ];
 
+/// Returns an export preset when the user asked for one, for the app to
+/// turn into an `AppCommand`. The view has no path to the worker.
 pub fn show(
     ctx: &egui::Context,
     route: &mut AppRoute,
     state: &mut GrowthState,
     modals: &mut Modals,
     project: Option<&Project>,
-) {
+) -> Option<String> {
     super::page(ctx, 1100.0, |ui| content(ui, route, state, modals, project));
+    state.export_requested.take()
+}
+
+/// The preset name the encoder is asked for, from the form's own controls.
+fn export_preset(state: &GrowthState) -> String {
+    const CODECS: [&str; 3] = ["h264", "hevc", "prores"];
+    const CONTAINERS: [&str; 3] = ["mp4", "mov", "mkv"];
+
+    format!(
+        "{}_{}{}",
+        CODECS.get(state.codec).copied().unwrap_or("h264"),
+        CONTAINERS.get(state.container).copied().unwrap_or("mp4"),
+        if state.burn_captions { "_burned" } else { "" }
+    )
 }
 
 pub fn content(
@@ -226,15 +248,14 @@ fn export(ui: &mut Ui, state: &mut GrowthState, modals: &mut Modals, project: Op
         property_row(ui, "Estimated size", "412 MB");
         property_row(ui, "Estimated time", "3m 20s");
         ui.add_space(10.0);
+        // Queues a real job. It used to open a progress modal that counted
+        // to a hundred and navigated — an animation, not an export.
         if pro_button(ui, "Render & Export", true).clicked() {
-            let next = project
-                .map(|p| AppRoute::Growth(p.id))
-                .unwrap_or(AppRoute::Dashboard);
-            modals.progress(
-                "Rendering",
-                "Encoding the timeline and muxing the selected thumbnail.",
-                ModalAction::Navigate(next),
-            );
+            state.export_requested = Some(export_preset(state));
+        }
+        if let Some(status) = &state.export_status {
+            ui.add_space(6.0);
+            ui.label(RichText::new(status).small().color(TEXT_SECONDARY));
         }
     });
 }
@@ -288,4 +309,39 @@ fn thumb_card(ui: &mut Ui, title: &str, note: &str, selected: bool, width: f32) 
     );
     p.galley(Pos2::new(rect.left() + 8.0, plate.bottom() + 9.0), t, TEXT_PRIMARY);
     resp.on_hover_text(note)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_export_preset_reflects_the_form_rather_than_a_hardcoded_string() {
+        let mut state = GrowthState::default();
+        state.codec = 1;
+        state.container = 2;
+        state.burn_captions = false;
+        assert_eq!(export_preset(&state), "hevc_mkv");
+
+        state.burn_captions = true;
+        assert_eq!(export_preset(&state), "hevc_mkv_burned");
+    }
+
+    #[test]
+    fn an_out_of_range_selection_falls_back_rather_than_panicking() {
+        let mut state = GrowthState::default();
+        state.codec = 99;
+        state.container = 99;
+        state.burn_captions = false;
+        assert_eq!(export_preset(&state), "h264_mp4");
+    }
+
+    #[test]
+    fn a_render_request_is_taken_once_and_only_once() {
+        let mut state = GrowthState::default();
+        state.export_requested = Some("h264_mp4".into());
+
+        assert_eq!(state.export_requested.take(), Some("h264_mp4".into()));
+        assert_eq!(state.export_requested.take(), None, "no duplicate job");
+    }
 }

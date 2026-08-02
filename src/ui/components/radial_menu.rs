@@ -74,6 +74,38 @@ impl RadialAction {
     }
 }
 
+/// Gate on the press/release cycle.
+///
+/// The menu opens on a *click*, and egui reports a click on the button's
+/// release — so the frame the menu first paints is already a release frame.
+/// Committing on that release would pick nothing and close the menu again,
+/// which is why a release only counts once a press has been seen while open.
+#[derive(Default)]
+struct Commit {
+    /// The frame the menu opened on, whose input belongs to the click that
+    /// asked for it. A fast click lands its press and release in that one
+    /// frame, so arming alone is not enough to ignore it.
+    fresh: bool,
+    armed: bool,
+}
+
+impl Commit {
+    fn reset(&mut self) {
+        self.fresh = true;
+        self.armed = false;
+    }
+
+    /// Whether this frame's input should act on the highlighted slice.
+    fn poll(&mut self, pressed: bool, released: bool) -> bool {
+        if self.fresh {
+            self.fresh = false;
+            return false;
+        }
+        self.armed |= pressed;
+        self.armed && released
+    }
+}
+
 #[derive(Default)]
 pub struct RadialMenu {
     center: Pos2,
@@ -81,6 +113,7 @@ pub struct RadialMenu {
     actions: Vec<RadialAction>,
     /// Index under the pointer, recomputed every frame.
     hovered: Option<usize>,
+    commit: Commit,
 }
 
 impl RadialMenu {
@@ -90,6 +123,7 @@ impl RadialMenu {
         self.target = Some(selection);
         self.center = pos;
         self.hovered = None;
+        self.commit.reset();
     }
 
     pub fn is_open(&self) -> bool {
@@ -104,6 +138,7 @@ impl RadialMenu {
     pub fn take_target(&mut self) -> Option<MediaSelection> {
         self.hovered = None;
         self.actions.clear();
+        self.commit.reset();
         self.target.take()
     }
 
@@ -131,18 +166,19 @@ impl RadialMenu {
         let mut chosen = None;
 
         area.show(ctx, |ui| {
-            let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+            // Allocated so the menu, not the panel underneath, owns these pixels.
+            let (rect, _response) = ui.allocate_exact_size(size, Sense::click());
             let center = rect.center();
             let pointer = ui.ctx().pointer_latest_pos();
 
             self.hovered = pointer.and_then(|pos| self.slice_at(center, pos));
             self.paint(ui.painter(), center);
 
-            // Either button releasing commits: the menu is usually opened with
-            // the right button held down, so it must accept that release too.
-            let released = ui.input(|i| i.pointer.any_released());
-            let clicked = response.clicked() || response.secondary_clicked();
-            if clicked || released {
+            // Either button commits, so a menu opened by the right button can be
+            // picked from with the left one.
+            let (pressed, released) =
+                ui.input(|i| (i.pointer.any_pressed(), i.pointer.any_released()));
+            if self.commit.poll(pressed, released) {
                 chosen = match self.hovered {
                     Some(index) => self.actions.get(index).copied(),
                     // Released in the dead zone or outside: dismissed.
@@ -313,12 +349,17 @@ mod tests {
     use super::*;
 
     fn menu(actions: Vec<RadialAction>) -> RadialMenu {
-        RadialMenu {
-            center: Pos2::ZERO,
-            target: Some(MediaSelection::PreviewScreen { seconds: 0.0 }),
-            actions,
-            hovered: None,
-        }
+        let mut menu = RadialMenu::default();
+        menu.center = Pos2::ZERO;
+        menu.target = Some(MediaSelection::PreviewScreen { seconds: 0.0 });
+        menu.actions = actions;
+        menu.commit.reset();
+        menu
+    }
+
+    /// One frame of pointer input, as `show` reads it.
+    fn frame(commit: &mut Commit, pressed: bool, released: bool) -> bool {
+        commit.poll(pressed, released)
     }
 
     fn four() -> RadialMenu {
@@ -402,6 +443,60 @@ mod tests {
         assert!(!actions.contains(&RadialAction::Delete));
         assert!(!actions.contains(&RadialAction::Split));
         assert!(actions.contains(&RadialAction::Cancel));
+    }
+
+    #[test]
+    fn the_click_that_opens_the_menu_does_not_also_close_it() {
+        let mut commit = Commit::default();
+        commit.reset();
+
+        // The menu paints for the first time on the frame the opening click was
+        // released — the frame that used to dismiss it immediately.
+        assert!(!frame(&mut commit, false, true), "opening release is not a choice");
+        assert!(!frame(&mut commit, false, false), "menu stays open while idle");
+        assert!(!frame(&mut commit, false, false));
+    }
+
+    #[test]
+    fn a_fast_click_lands_press_and_release_in_the_opening_frame() {
+        let mut commit = Commit::default();
+        commit.reset();
+
+        // At 30fps a quick click reports both in one frame; it still belongs to
+        // the click that opened the menu.
+        assert!(!frame(&mut commit, true, true));
+        assert!(!frame(&mut commit, false, false));
+    }
+
+    #[test]
+    fn the_next_click_commits_on_its_release() {
+        let mut commit = Commit::default();
+        commit.reset();
+        frame(&mut commit, false, true);
+
+        assert!(!frame(&mut commit, true, false), "pressing only arms");
+        assert!(!frame(&mut commit, false, false), "held, still choosing");
+        assert!(frame(&mut commit, false, true), "release picks the slice");
+    }
+
+    #[test]
+    fn a_stray_release_without_a_press_is_ignored() {
+        let mut commit = Commit::default();
+        commit.reset();
+        frame(&mut commit, false, false);
+
+        // Releasing a button that went down before the menu opened — a drag
+        // ending, say — must not count as a choice.
+        assert!(!frame(&mut commit, false, true));
+    }
+
+    #[test]
+    fn reopening_the_menu_starts_the_cycle_again() {
+        let mut menu = four();
+        menu.commit.armed = true;
+        menu.open_at(Pos2::new(5.0, 5.0), MediaSelection::PreviewScreen { seconds: 0.0 });
+
+        assert!(!frame(&mut menu.commit, false, true), "the reopening click");
     }
 
     #[test]

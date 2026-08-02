@@ -12,7 +12,7 @@ pub mod outlier_engine;
 
 pub use aggregator::InsightsAggregator;
 pub use blueprint::{generate as generate_blueprint, BlueprintSettings};
-pub use heatmap::{build as build_heatmap, from_transcript, TimedWord};
+pub use heatmap::{build as build_heatmap, from_cues, from_transcript, TimedWord};
 pub use models::{
     ChannelMetrics, OutlierAnalysis, OutlierMethod, PacingHeatmap, PacingWindow, VideoMetrics,
     ViralBlueprint, ViralScore,

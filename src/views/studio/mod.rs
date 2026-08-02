@@ -4,6 +4,7 @@ pub mod dnd;
 pub mod ai_context;
 pub mod media_panel;
 pub mod persistence;
+pub mod revisions;
 pub mod tool_runner;
 pub mod timeline_panel;
 
@@ -11,8 +12,10 @@ use crate::app::modals::{ModalAction, Modals};
 use crate::app::router::AppRoute;
 use crate::app::Project;
 use crate::audio_engine::{AudioEngine, WaveformService};
-use crate::media::{Decoded, PreviewEngine, Quality, Textures};
+use crate::media::{Decoded, MediaKind, PreviewEngine, Quality, Textures};
+use crate::ai_tooling::orchestration::dispatcher::ActionCommand as AsyncJobCommand;
 use crate::ai_tooling::orchestration::{AsyncJob, PromptContext};
+use crate::ai_tooling::revision::generation::GeneratedKind;
 use crate::models::MediaSelection;
 use crate::ui::components::inspector::preview_plate;
 use crate::ui::components::radial_menu::{RadialAction, RadialMenu};
@@ -67,7 +70,15 @@ pub struct StudioState {
     /// Context menu opened by a secondary click.
     pub radial: RadialMenu,
 
-    /// Heavy work the dispatcher defers. Drained by the studio each frame.
+    /// Competitor-driven edit plan, its ghosts and its execution pipeline.
+    pub revisions: revisions::RevisionState,
+    pub show_revisions: bool,
+
+    /// Heavy work the dispatcher defers, and the queue it lands in.
+    ///
+    /// Drained by `take_async_jobs` each frame and forwarded to the
+    /// orchestrator. Before that existed the receiver was never read, so a
+    /// model asking for a render was told "queued" and nothing happened.
     async_jobs: Sender<AsyncJob>,
     async_inbox: Receiver<AsyncJob>,
 }
@@ -95,6 +106,8 @@ impl Default for StudioState {
             tool_status: None,
             speed_factor: 2.0,
             radial: RadialMenu::default(),
+            revisions: Default::default(),
+            show_revisions: true,
             async_jobs,
             async_inbox,
         }
@@ -143,6 +156,15 @@ pub fn show(
             .show(ctx, |ui| chat_panel::show(ui, &mut state.chat, time));
     }
 
+    if state.show_revisions && state.revisions.has_plan() && w >= CHAT_MIN_W {
+        egui::SidePanel::left("studio_revisions")
+            .resizable(true)
+            .default_width((w * 0.24).clamp(280.0, 400.0))
+            .width_range(260.0..=480.0)
+            .frame(panel_frame())
+            .show(ctx, |ui| revisions::show(ui, &mut state.revisions));
+    }
+
     if media_visible {
         egui::SidePanel::right("studio_media")
             .resizable(true)
@@ -159,6 +181,9 @@ pub fn show(
                 }
             });
     }
+
+    // Resolved before the timeline borrows `state.timeline` mutably.
+    let ghosts = state.revisions.ghosts();
 
     egui::TopBottomPanel::bottom("studio_timeline")
         .resizable(true)
@@ -180,6 +205,7 @@ pub fn show(
                 &state.waveforms,
                 context,
                 &mut state.radial,
+                &ghosts,
             )
         })
         .inner
@@ -296,6 +322,27 @@ fn inject_editor_state(state: &mut StudioState) {
 }
 
 /// Routes a pie-menu choice. `Cancel` never reaches here — the menu closes on it.
+/// Registers a generated asset in the pool ahead of the commands that use it.
+pub fn register_asset(
+    state: &mut StudioState,
+    asset: &crate::ai_tooling::revision::generation::GeneratedAsset,
+) {
+    if state.media.assets.iter().any(|a| a.name == asset.name) {
+        return;
+    }
+    let kind = match asset.kind {
+        GeneratedKind::Audio => MediaKind::Audio,
+        GeneratedKind::Video => MediaKind::Video,
+    };
+    state.media.assets.push(media_panel::Asset::demo(
+        &asset.name,
+        "AI generated",
+        asset.duration_sec,
+        kind,
+        true,
+    ));
+}
+
 fn apply_radial_action(state: &mut StudioState, modals: &mut Modals, action: RadialAction) {
     let Some(selection) = state.radial.take_target() else {
         return;
@@ -583,6 +630,19 @@ fn toolbar(
                 {
                     state.show_media = !state.show_media;
                 }
+                // Only offered once a comparison has produced something.
+                if state.revisions.has_plan() {
+                    let pending = state.revisions.plan.pending_count();
+                    if ui
+                        .selectable_label(
+                            state.show_revisions,
+                            RichText::new(format!("Plan ({pending})")).small(),
+                        )
+                        .clicked()
+                    {
+                        state.show_revisions = !state.show_revisions;
+                    }
+                }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if pro_button(ui, "Growth & Export", true).clicked() {
@@ -590,15 +650,16 @@ fn toolbar(
                             *route = AppRoute::Growth(p.id);
                         }
                     }
-                    if pro_button(ui, "Render", false).clicked() {
-                        let next = project
-                            .map(|p| AppRoute::Growth(p.id))
-                            .unwrap_or(AppRoute::Dashboard);
-                        modals.progress(
-                            "Rendering",
-                            "Encoding the current cut.",
-                            ModalAction::Navigate(next),
-                        );
+                    // The research screen diffs a competitor against *this*
+                    // timeline, so the Studio is where it is wanted; reaching
+                    // it meant going back to Projects first.
+                    if pro_button(ui, "Analyze Competitor", false)
+                        .on_hover_text(
+                            "Examine a YouTube channel, deconstruct an outlier, and build an                              edit plan against this timeline",
+                        )
+                        .clicked()
+                    {
+                        *route = AppRoute::Insights;
                     }
                     if pro_button(ui, "Projects", false).clicked() {
                         *route = AppRoute::Dashboard;
@@ -681,4 +742,22 @@ fn preview(ui: &mut Ui, state: &mut StudioState, project: Option<&Project>) {
             });
         });
     });
+}
+
+impl StudioState {
+    /// Heavy work the dispatcher deferred since the last frame.
+    pub fn take_async_jobs(&mut self) -> Vec<AsyncJob> {
+        self.async_inbox.try_iter().collect()
+    }
+
+    /// Applies model- or worker-produced edits.
+    ///
+    /// A method rather than a free function taking three borrows: the fields
+    /// are disjoint, and only `self` can prove that to the borrow checker.
+    pub fn apply_actions(
+        &mut self,
+        commands: Vec<AsyncJobCommand>,
+    ) -> crate::ai_tooling::orchestration::DispatchReport {
+        dispatch::dispatch(commands, &mut self.timeline, &self.media, &self.async_jobs)
+    }
 }

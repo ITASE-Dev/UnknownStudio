@@ -1,12 +1,15 @@
 //! OpenAI Chat Completions with strict Structured Outputs.
 
+use crate::ai_tooling::pipeline::schema::SchemaSpec;
 use crate::ai_tooling::providers::{Completion, MAX_TOKENS};
 use crate::ai_tooling::{AiToolingError, Result};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-const SCHEMA_NAME: &str = "editing_blueprint";
+/// Schema name used by the original blueprint call, kept so that request is
+/// byte-for-byte what it always was.
+pub(crate) const SCHEMA_NAME: &str = "editing_blueprint";
 
 pub struct OpenAiClient {
     http: Client,
@@ -37,12 +40,27 @@ impl OpenAiClient {
         payload: &Value,
         schema: &Value,
     ) -> Result<Completion> {
+        self.complete_with(system_prompt, payload, &SchemaSpec::new(SCHEMA_NAME, schema.clone()))
+            .await
+    }
+
+    /// Structured completion against a named schema.
+    ///
+    /// The pipeline needs one name per agent — the API echoes it back, and a
+    /// single shared name makes three different contracts indistinguishable in
+    /// a log.
+    pub async fn complete_with(
+        &self,
+        system_prompt: &str,
+        payload: &Value,
+        spec: &SchemaSpec,
+    ) -> Result<Completion> {
         let body = json!({
             "model": self.model,
             "max_tokens": MAX_TOKENS,
             "response_format": {
                 "type": "json_schema",
-                "json_schema": { "name": SCHEMA_NAME, "strict": true, "schema": schema },
+                "json_schema": { "name": spec.name, "strict": true, "schema": spec.schema },
             },
             "messages": [
                 { "role": "system", "content": system_prompt },

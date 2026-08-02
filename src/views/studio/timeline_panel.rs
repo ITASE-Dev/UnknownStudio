@@ -4,6 +4,7 @@ use crate::ui::components::timeline::markers::{
     playhead_marker, playhead_timecode, ripple_cut_marker, timeline_marker,
 };
 use crate::ai_tooling::orchestration::{TextAnimation, TextStyle};
+use crate::ai_tooling::revision::models::{GhostKind, GhostSpan};
 use crate::audio_engine::AudioSegment;
 use crate::media::{Poster, Segment, Textures, FILMSTRIP_FRAMES};
 use crate::models::MediaSelection;
@@ -17,7 +18,10 @@ use crate::ui::core::icons;
 use crate::ui::core::inputs::pro_slider;
 use crate::ui::theme::tokens::*;
 use crate::views::studio::dnd::{self, DragAsset};
-use eframe::egui::{Align, Layout, Pos2, Rect, RichText, ScrollArea, Stroke, Ui, Vec2};
+use eframe::egui::{
+    Align, Align2, Color32, FontFamily, FontId, Layout, Pos2, Rect, RichText, ScrollArea,
+    Stroke, Ui, Vec2,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -696,6 +700,90 @@ fn uncovered(program: &[Segment], start: f32, end: f32) -> Vec<(f32, f32)> {
     gaps
 }
 
+/// Draws captions as a ribbon along the top video lane.
+///
+/// `add_text` has always stored these; nothing drew them, so an `ADD_TEXT` from
+/// the assistant or the retention engine mutated state invisibly and looked
+/// like a no-op. Painted, not allocated, so a caption can never intercept a
+/// click meant for the clip beneath it.
+fn paint_captions(ui: &Ui, lanes: &[Rect], texts: &[TimelineText], px: f32) {
+    const RIBBON_H: f32 = 12.0;
+
+    let Some(lane) = lanes.first() else {
+        return;
+    };
+    if texts.is_empty() {
+        return;
+    }
+    let painter = ui.painter();
+
+    for text in texts {
+        let span = (text.end - text.start).max(0.05);
+        let full = clip_rect(*lane, text.start, span, px);
+        // A ribbon along the top edge, so the filmstrip stays readable.
+        let rect = Rect::from_min_size(full.left_top(), Vec2::new(full.width(), RIBBON_H));
+
+        painter.rect_filled(rect, R_SM, AI.gamma_multiply(0.75));
+        // Elided by the clip rect: a long caption must not run over its
+        // neighbour and imply a span it does not have.
+        painter.with_clip_rect(rect).text(
+            rect.left_center() + Vec2::new(4.0, 0.0),
+            Align2::LEFT_CENTER,
+            &text.text,
+            FontId::new(9.0, FontFamily::Proportional),
+            Color32::WHITE,
+        );
+    }
+}
+
+/// Draws the proposed edits from the revision panel as translucent overlays.
+///
+/// A ghost is a preview, never a hit target: it is painted straight onto the
+/// lane and allocates nothing, so hovering the plan cannot disturb a drag or
+/// steal a click from the clip underneath.
+fn paint_ghosts(ui: &Ui, lanes: &[Rect], ghosts: &[GhostSpan], px: f32) {
+    if ghosts.is_empty() || lanes.is_empty() {
+        return;
+    }
+    let painter = ui.painter();
+
+    for ghost in ghosts {
+        let color = match ghost.kind {
+            GhostKind::BRoll => CLIP_BROLL,
+            GhostKind::Sfx => CLIP_AUDIO,
+            GhostKind::Warning => WARN,
+            GhostKind::Ending => AI,
+        };
+
+        // A ghost bound to a track sits on it; an unbound one spans every lane,
+        // because the change it previews is not a block on one row.
+        let targets: Vec<&Rect> = match ghost.track_index {
+            Some(index) => lanes.get(index).into_iter().collect(),
+            None => lanes.iter().collect(),
+        };
+
+        for lane in targets {
+            let rect = clip_rect(*lane, ghost.start_sec, ghost.duration_sec.max(0.2), px);
+            painter.rect_filled(rect, R_SM, color.gamma_multiply(0.28));
+            painter.rect_stroke(rect, R_SM, Stroke::new(1.5_f32, color));
+        }
+
+        // The label goes on the first lane only, or it repeats down the stack.
+        let anchor = match ghost.track_index.and_then(|i| lanes.get(i)) {
+            Some(lane) => lane,
+            None => &lanes[0],
+        };
+        let rect = clip_rect(*anchor, ghost.start_sec, ghost.duration_sec.max(0.2), px);
+        painter.text(
+            rect.left_top() + Vec2::new(4.0, -2.0),
+            Align2::LEFT_BOTTOM,
+            &ghost.label,
+            FontId::new(10.0, FontFamily::Proportional),
+            color,
+        );
+    }
+}
+
 /// `drag` carries a media-pool asset in flight; it is consumed here on drop.
 /// What the tool strip needs to know about the current selection.
 pub struct ToolContext<'a> {
@@ -713,6 +801,7 @@ pub fn show(
     waveforms: &HashMap<String, Arc<Vec<f32>>>,
     tools: ToolContext<'_>,
     menu: &mut RadialMenu,
+    ghosts: &[GhostSpan],
 ) -> Option<Tool> {
     let pressed_tool = toolbar(ui, state, &tools);
     ui.add_space(6.0);
@@ -868,6 +957,11 @@ pub fn show(
                             }
                         }
                     }
+
+                    // Captions, then proposed edits: both sit over the
+                    // clips and under the markers.
+                    paint_captions(ui, &lanes, &state.texts, px);
+                    paint_ghosts(ui, &lanes, ghosts, px);
 
                     if let (Some(first), Some(last)) = (lanes.first(), lanes.last()) {
                         let area = Rect::from_min_max(first.left_top(), last.right_bottom());

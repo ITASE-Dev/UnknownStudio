@@ -2,6 +2,7 @@
 //! the rhythm numbers an edit can be matched against.
 
 use crate::ai_tooling::audio_analysis::models::{TranscriptOutput, Word};
+use crate::ai_tooling::scraping::models::Cue;
 use crate::ai_tooling::visual_analysis::models::VisualTimeline;
 use crate::ai_tooling::youtube_insights::models::{PacingHeatmap, PacingWindow};
 
@@ -41,6 +42,44 @@ pub fn from_transcript(
 ) -> PacingHeatmap {
     let words: Vec<TimedWord> = transcript.transcript.words.iter().map(TimedWord::from).collect();
     build(video_id, &words, transcript.media.duration_sec, visual)
+}
+
+/// Measures a scraped caption track.
+///
+/// Captions carry phrase timings, not word timings, so each word is spread
+/// evenly across its cue. Word counts and the gaps *between* cues stay exact —
+/// only the position of a word inside its own cue is approximated, which the
+/// per-window rates are insensitive to.
+pub fn from_cues(video_id: &str, cues: &[Cue], duration_sec: f32, visual: Option<&VisualTimeline>) -> PacingHeatmap {
+    let mut words: Vec<TimedWord> = Vec::new();
+    let mut previous_end: Option<f32> = None;
+
+    for cue in cues {
+        let tokens: Vec<&str> = cue.text.split_whitespace().collect();
+        if tokens.is_empty() {
+            continue;
+        }
+
+        let start = cue.start as f32;
+        let span = ((cue.end - cue.start) as f32).max(0.01);
+        let each = span / tokens.len() as f32;
+
+        for index in 0..tokens.len() {
+            let word_start = start + each * index as f32;
+            words.push(TimedWord {
+                start: word_start,
+                end: word_start + each,
+                gap_before: match previous_end {
+                    // Only the first word of a cue can follow a real silence.
+                    Some(end) if index == 0 => (word_start - end).max(0.0),
+                    _ => 0.0,
+                },
+            });
+            previous_end = Some(word_start + each);
+        }
+    }
+
+    build(video_id, &words, duration_sec, visual)
 }
 
 /// Measures any timed word list — the shape a scraped transcript arrives in.
@@ -244,6 +283,30 @@ mod tests {
 
         let without = build("v1", &steady(10), 60.0, None);
         assert_eq!(without.broll_density, None, "unknown, not zero");
+    }
+
+    #[test]
+    fn caption_cues_become_a_measurable_heatmap() {
+        // Two cues, three words each, with a two-second silence between them.
+        let cues = vec![
+            Cue { start: 0.0, end: 3.0, text: "this is fast".into() },
+            Cue { start: 5.0, end: 8.0, text: "and this follows".into() },
+        ];
+
+        let heatmap = from_cues("v1", &cues, 10.0, None);
+        assert_eq!(heatmap.overall_wpm, 36.0, "6 words in 10s");
+        // The silence between cues survives as a real cut opportunity.
+        assert!((heatmap.max_gap_sec - 2.0).abs() < 0.01);
+        assert_eq!(heatmap.jump_cut_frequency, 6.0, "one cut per 10s");
+    }
+
+    #[test]
+    fn empty_cues_are_skipped_rather_than_counted() {
+        let cues = vec![
+            Cue { start: 0.0, end: 1.0, text: "   ".into() },
+            Cue { start: 1.0, end: 2.0, text: "word".into() },
+        ];
+        assert!((from_cues("v1", &cues, 2.0, None).overall_wpm - 30.0).abs() < 1e-3);
     }
 
     #[test]

@@ -59,6 +59,13 @@ impl DeepScraper {
         })
     }
 
+    /// Transcript cues for a video, for callers that want the whole thing
+    /// rather than the window around the replay peak.
+    pub async fn transcript(&self, url: &str) -> Result<Vec<Cue>> {
+        let metadata = dump_metadata(url).await?;
+        self.transcript_cues(&metadata).await
+    }
+
     /// Auto-generated captions first; they exist far more often than manual ones.
     async fn transcript_cues(&self, metadata: &VideoMetadata) -> Result<Vec<Cue>> {
         let track = transcript::select_english_track(&metadata.automatic_captions)

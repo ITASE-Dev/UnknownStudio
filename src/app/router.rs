@@ -9,6 +9,8 @@ pub enum AppRoute {
     Onboarding,
     Studio(ProjectId),
     Growth(ProjectId),
+    /// Channel research — not bound to a project.
+    Insights,
 }
 
 impl AppRoute {
@@ -18,6 +20,7 @@ impl AppRoute {
             Self::Onboarding => "New Project",
             Self::Studio(_) => "Studio",
             Self::Growth(_) => "Growth & Export",
+            Self::Insights => "Channel Research",
         }
     }
 

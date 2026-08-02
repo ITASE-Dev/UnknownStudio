@@ -8,11 +8,14 @@
 pub mod audio_analysis;
 pub mod chat;
 pub mod comfyui;
+pub mod competitor;
 pub mod config;
 pub mod ingestion;
 pub mod orchestration;
+pub mod pipeline;
 pub mod prompting;
 pub mod providers;
+pub mod revision;
 pub mod scraping;
 pub mod visual_analysis;
 pub mod youtube_insights;
@@ -20,9 +23,15 @@ pub mod youtube_insights;
 pub use audio_analysis::{analyze_audio, AudioAnalysisError, TranscriptOutput};
 pub use chat::{ChatBridge, ChatClient, ChatError, ChatEvent, ChatSession, ContextBudget, Message, Role};
 pub use comfyui::{ComfyEvent, ComfyUiClient, ComfyUiError, JobProgress, ProgressListener};
+pub use competitor::{CompetitorDataStore, CompetitorVideo, InMemoryWarehouse, SemanticIndex};
+pub use revision::{
+    ComparisonEngine, CurrentTimelineState, DiffSettings, RevisionAction, RevisionPlan,
+    RevisionTask, TaskStatus,
+};
 pub use config::{AiToolingConfig, ProviderKind};
 pub use ingestion::{ChannelIngest, VideoRecord, YouTubeClient};
 pub use orchestration::{Blueprint, BlueprintEngine, PipelineReport, StageFailure};
+pub use pipeline::{CompetitorDNA, LlmPipelineEngine, PipelineError, PipelineOutput};
 pub use providers::LlmClient;
 pub use scraping::{DeepScraper, PeakAnalysis};
 pub use visual_analysis::{analyze_motion, MotionSpike, VisualTimeline};
